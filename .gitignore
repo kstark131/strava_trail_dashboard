@@ -1,4 +1,7 @@
-.Rproj.user
+.httr-oauth
+.Renviron
 .Rhistory
 .RData
-.Ruserdata
+data/
+figures/
+gpx/
