@@ -36,7 +36,9 @@ COL <- list(done = "#1c8a5a", partial = "#d9930f", todo = "#c4463b", run = "#3a5
 # ------------------------------------------------------------------------------
 fmt1 <- function(x) formatC(x, format = "f", digits = 1, big.mark = ",")
 fmt0 <- function(x) formatC(x, format = "d", big.mark = ",")
-pct  <- function(f) paste0(formatC(100 * f, format = "f", digits = ifelse(f >= 0.995 | f == 0, 0, 1)), "%")
+pct <- function(f) {
+  vapply(f, function(x) paste0(formatC(100 * x, format = "f", digits = ifelse(x >= 0.995 | x == 0, 0, 1)), "%"), character(1))
+}
 cls  <- function(f) ifelse(f >= D$params$done_fraction, "done", ifelse(f > 0.005, "partial", "todo"))
 
 # Covered/uncovered pieces of a set of trails at a threshold. Node i covers the
@@ -71,7 +73,7 @@ ui <- page_sidebar(
     selectInput("park", "Park", choices = park_choices, selected = ""),
     sliderInput("thr", "Match distance (m)", min = 5, max = 60, value = D$params$default_match_m, step = 5),
     checkboxInput("svc", "Include service roads", value = FALSE),
-    checkboxInput("showruns", "Show runs on map", value = TRUE),
+    checkboxInput("showruns", "Show runs on map", value = FALSE),
     layout_columns(
       value_box("Miles run", textOutput("s_run"), p(textOutput("s_run_l", inline = TRUE), class = "small text-muted")),
       value_box("Trail miles", textOutput("s_trail")),
@@ -238,7 +240,7 @@ server <- function(input, output, session) {
         if (nrow(todo)) m <- addPolylines(m, data = todo, color = COL$todo, weight = 3, opacity = 0.8, label = ~label, group = "trails")
         if (nrow(done)) m <- addPolylines(m, data = done, color = COL$done, weight = 4, opacity = 0.95, label = ~label, group = "trails")
       }
-      pk <- filter(parks_ll, park == !!park)
+      pk <- filter(parks_ll, park == .env$park)
       if (nrow(pk)) m <- addPolygons(m, data = pk, fill = FALSE, color = COL$ink, weight = 1.5, dashArray = "4 4",
                                      group = "parks", options = pathOptions(interactive = FALSE))
     } else {
@@ -258,8 +260,8 @@ server <- function(input, output, session) {
 
   view_bbox <- function(park) {
     if (nzchar(park)) {
-      bb <- st_bbox(filter(trails_ll, park == !!park))
-      pk <- filter(parks_ll, park == !!park)
+      bb <- st_bbox(filter(trails_ll, park == .env$park))
+      pk <- filter(parks_ll, park == .env$park)
       if (nrow(pk)) {
         pb <- st_bbox(pk)
         bb <- c(xmin = min(bb["xmin"], pb["xmin"]), ymin = min(bb["ymin"], pb["ymin"]),
@@ -272,7 +274,7 @@ server <- function(input, output, session) {
   output$map <- renderLeaflet({
     bb <- view_bbox(isolate(input$park))
     m <- leaflet(options = leafletOptions(preferCanvas = TRUE)) %>%
-      addProviderTiles(providers$CartoDB.Positron, group = "Light") %>%
+      addProviderTiles(providers$Esri.WorldTopoMap, group = "Light") %>%
       addProviderTiles(providers$OpenTopoMap, group = "Topo") %>%
       addLayersControl(baseGroups = c("Light", "Topo"), position = "topright") %>%
       addScaleBar(position = "bottomleft") %>%
@@ -281,11 +283,13 @@ server <- function(input, output, session) {
       addLegend(position = "bottomright", colors = c(COL$done, COL$todo, COL$run),
                 labels = c("Run", "Not run", "Run tracks"), opacity = 0.9) %>%
       fitBounds(bb[["xmin"]], bb[["ymin"]], bb[["xmax"]], bb[["ymax"]])
-    # isolate(): the initial draw uses the current inputs without making the
-    # whole map re-render (and reset its zoom) on every later change
+    
+    if (!isolate(input$showruns)) {
+      m <- hideGroup(m, "runs")
+    }
+    
     draw_trails(m, isolate(cov()), isolate(input$park), isolate(input$thr))
   })
-
   # redraw trails and boundary when scope or threshold changes
   observeEvent(list(input$park, input$thr, input$svc), {
     proxy <- leafletProxy("map") %>% clearGroup("trails") %>% clearGroup("parks") %>% clearGroup("highlight")

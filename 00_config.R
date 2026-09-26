@@ -40,7 +40,7 @@ crs_projected <- 26910  # NAD83 / UTM zone 10N, metres. All distance work happen
 
 # --- ACTIVITY FILTERS ----------------------------------------------------------
 target_activities <- c("Run")            # e.g. c("Run", "Hike", "Walk")
-filter_start_date <- ""                  # "" = no limit, or "2024-01-01"
+filter_start_date <- 2025-11-15                  # "" = no limit, or "2024-01-01"
 filter_end_date   <- ""                  # "" = today
 min_distance_km   <- 0.5                 # drops accidental recordings
 ignore_keywords   <- c("treadmill", "indoor")
