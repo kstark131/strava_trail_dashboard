@@ -43,6 +43,8 @@ cls  <- function(f) ifelse(f >= D$params$done_fraction, "done", ifelse(f > 0.005
 
 # Covered/uncovered pieces of a set of trails at a threshold. Node i covers the
 # bin [(i-1)/n, i/n] of the line, so runs of covered nodes become [from, to].
+# Covered/uncovered pieces of a set of trails at a threshold. Node i covers the
+# bin [(i-1)/n, i/n] of the line, so runs of covered nodes become [from, to].
 split_by_coverage <- function(ids, thr) {
   nd <- node_dist %>% filter(trail_id %in% ids) %>% arrange(trail_id, node_i)
   iv <- nd %>%
@@ -55,10 +57,19 @@ split_by_coverage <- function(ids, thr) {
       tibble(covered = r$values, from = (starts - 1) / n, to = ends / n)
     }) %>%
     ungroup()
+  
   if (!nrow(iv)) return(NULL)
+  
   g <- st_geometry(trails_proj)[match(iv$trail_id, trails_proj$trail_id)]
-  pieces <- st_sf(iv, geometry = st_linesubstring(g, iv$from, iv$to)) %>%
+  
+  # Process st_linesubstring row-by-row to prevent vectorization errors
+  geom_list <- lapply(seq_len(nrow(iv)), function(i) {
+    st_linesubstring(g[i], iv$from[i], iv$to[i])
+  })
+  
+  pieces <- st_sf(iv, geometry = do.call(c, geom_list)) %>%
     st_transform(4326)
+  
   pieces
 }
 
