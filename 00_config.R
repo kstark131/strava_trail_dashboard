@@ -16,8 +16,12 @@ dir_gpx     <- file.path(dir_project, "gpx")            # optional: Strava bulk 
 
 # Trail and park layers. Shapefile (.shp) or GeoJSON (.geojson) both work.
 # EBRPD publishes these on its GIS Open Data hub (linked from ebparks.org/maps).
-path_trails <- "C:/Users/kstar/Desktop/strava/EBRPD_Roads_and_Trails_2536103029614549705/Roads_and_Trails-by_Access.shp"
-path_parks  <- "C:/Users/kstar/Desktop/strava/EBRPD_Park_Boundaries_-5406634565931984723/Ebrparkp_m.shp"
+#path_trails <- "C:/Users/kstar/Desktop/strava/EBRPD_Roads_and_Trails_2536103029614549705/Roads_and_Trails-by_Access.shp"
+#path_parks  <- "C:/Users/kstar/Desktop/strava/EBRPD_Park_Boundaries_-5406634565931984723/Ebrparkp_m.shp"
+
+path_parks <- "/Users/kylestark/Desktop/R projects/strava_dashboard/EBRPD/EBRPD_Park_Boundaries_-7891795993450239876"
+path_trails <- "/Users/kylestark/Desktop/R projects/strava_dashboard/EBRPD/EBRPD_Roads_and_Trails_-1064327229162888676"
+
 
 # Optional city boundary, used only by 04_static_figures.R.
 path_city_boundary <- "C:/Users/kstar/Desktop/strava/California_Incorporated_Cities/"
