@@ -1,26 +1,6 @@
 # ==============================================================================
 # SCRIPT 1: DOWNLOAD FROM STRAVA
 # ==============================================================================
-# What changed versus the earlier version and why:
-#  * Streams are now requested straight from the Strava API with no
-#    "resolution" parameter, which returns every recorded point. rStrava's
-#    get_activity_streams() always sends resolution = "high" with
-#    series_type = "distance", so Strava resampled the track instead of
-#    returning the raw recording. That, plus empty results being cached when
-#    rStrava's column names did not match, is the likely source of the
-#    simplified tracks. rStrava is still used for auth and the activity list.
-#  * Streams are cached one file per activity in data/streams_full/. Re-running
-#    the script only fetches activities you have not downloaded yet.
-#  * Only definite "no GPS" answers are cached as empty. Errors are not cached,
-#    so a failed request is retried next run instead of being stuck as empty.
-#  * Rate limits are handled: the script waits for the next 15-minute window
-#    when Strava returns 429 and then continues.
-#  * A resolution report at the end tells you whether the tracks are full
-#    resolution (point spacing of a few metres) or not.
-#  * Coordinates are never rounded. If you export to JSON, use digits = NA.
-#
-# Output: data/activities.rds (one row per activity)
-#         data/streams.rds    (one row per GPS point, all activities)
 
 library(sf)
 library(dplyr)
