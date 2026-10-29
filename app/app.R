@@ -4,9 +4,9 @@
 # Run from the project folder:  shiny::runApp("app")
 # Reads data/app_data.rds written by 03_match_runs_to_trails.R.
 #
-# Layout: sidebar (park, match distance, map options, stats, table) and a
-# leaflet map. Every input feeds the `cov()` reactive; everything else derives
-# from it.
+# Layout: sidebar (park, match distance, map options, route suggestion, stats,
+# table) and a leaflet map. Every input feeds the `cov()` reactive; everything
+# else derives from it. Route suggestions live in route_suggest.R.
 
 library(shiny)
 library(bslib)
@@ -15,6 +15,7 @@ library(sf)
 library(dplyr)
 library(DT)
 library(lwgeom)     # st_linesubstring, used to draw run and unrun pieces of a trail
+source("route_suggest.R")
 
 sf_use_s2(FALSE)
 M_PER_MI <- 1609.344
@@ -30,8 +31,27 @@ parks_ll    <- D$parks_ll
 runs_ll     <- D$runs_ll
 park_choices <- c("All parks" = "", sort(unique(trails_ll$park)))
 
+# route settings come from 00_config.R via app_data; defaults for older bundles
+RP <- modifyList(list(route_snap_m = 15, route_default_mi = 5, route_max_mi = 20), as.list(D$params))
+trail_source <- if (is.null(D$trail_source)) "file" else D$trail_source
+
 COL <- list(done = "#1c8a5a", partial = "#d9930f", todo = "#c4463b", run = "#3a5fcd", ink = "#1f2a26",
-            trail = "#8a4b14", service = "#6b6b6b")
+            trail = "#8a4b14", service = "#6b6b6b", route = "#6a2c91")
+
+# A few rules on top of the bslib theme: a warm off-white page, softer cards,
+# a tidy accordion and legend.
+CSS <- "
+  .bslib-sidebar-layout > .sidebar { background: #f3f1ea; border-right: 1px solid #e2ded2; }
+  .bslib-value-box { border: 1px solid #e2ded2; box-shadow: none; }
+  .bslib-value-box .value-box-value { font-weight: 600; }
+  .accordion-button { padding: .55rem .8rem; font-weight: 500; }
+  .accordion-body { padding: .6rem .8rem; }
+  .info.legend { border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,.15); font-size: 12px; }
+  .progress-thin { height: 6px; background: rgba(255,255,255,.35); margin-top: .35rem; }
+  .route-steps { font-size: .85rem; padding-left: 1.2rem; margin: .4rem 0; max-height: 14rem; overflow-y: auto; }
+  .subtitle { font-weight: 400; color: #6b7c74; margin-left: .5rem; font-size: .9em; }
+  table.dataTable tbody td { vertical-align: middle; }
+"
 
 # Basemaps offered in the layer control (top right). The first one is shown
 # when the app opens; reorder to change the default. All are free and need no
@@ -90,23 +110,45 @@ split_by_coverage <- function(ids, thr) {
 # UI
 # ------------------------------------------------------------------------------
 ui <- page_sidebar(
-  title = "Trail completion",
-  theme = bs_theme(version = 5, base_font = font_google("IBM Plex Sans"), primary = COL$done),
+  title = span("Trail completion", span(class = "subtitle", textOutput("subtitle", inline = TRUE))),
+  theme = bs_theme(version = 5, bg = "#fbfaf6", fg = COL$ink, primary = "#1f6f4a", secondary = "#6b7c74",
+                   base_font = font_google("IBM Plex Sans"), "border-radius" = "0.6rem") |>
+          bs_add_rules(CSS),
   sidebar = sidebar(
     width = 400,
     selectInput("park", "Park", choices = park_choices, selected = ""),
     sliderInput("thr", "Match distance (m)", min = 5, max = 60, value = D$params$default_match_m, step = 5),
-    radioButtons("view", "Trail colours",
-                 choices = c("Completion (run / not run)" = "completion",
-                             "Plain trails (no run data)" = "plain"),
-                 selected = "completion"),
     checkboxInput("svc", "Include service roads", value = FALSE),
-    checkboxInput("showruns", "Show my run tracks", value = FALSE),
+    accordion(
+      open = FALSE,
+      accordion_panel(
+        "Map options",
+        radioButtons("view", "Trail colours",
+                     choices = c("Completion (run / not run)" = "completion",
+                                 "Plain trails (no run data)" = "plain"),
+                     selected = "completion"),
+        checkboxInput("showruns", "Show my run tracks", value = FALSE)
+      ),
+      accordion_panel(
+        "Route suggestion",
+        checkboxInput("route", "Suggest a route through unrun trail", value = FALSE),
+        conditionalPanel(
+          "input.route",
+          sliderInput("route_mi", "Target length (mi)", min = 1, max = RP$route_max_mi,
+                      value = RP$route_default_mi, step = 0.5),
+          checkboxInput("route_loop", "Loop back to the start", value = TRUE),
+          p(class = "small text-muted",
+            "Starts where most of your runs here began. Click the map to move the start."),
+          uiOutput("route_info")
+        )
+      )
+    ),
     layout_columns(
       value_box("Miles run", textOutput("s_run"), p(textOutput("s_run_l", inline = TRUE), class = "small text-muted")),
       value_box("Trail miles", textOutput("s_trail")),
       value_box("Trail miles completed", textOutput("s_done"), theme = "primary"),
-      value_box("Completed", textOutput("s_pct"), p(textOutput("s_pct_l", inline = TRUE), class = "small"), theme = "primary"),
+      value_box("Completed", textOutput("s_pct"), uiOutput("s_pct_bar"),
+                p(textOutput("s_pct_l", inline = TRUE), class = "small"), theme = "primary"),
       col_widths = c(6, 6, 6, 6)
     ),
     div(class = "d-flex gap-2 align-items-center",
@@ -115,7 +157,8 @@ ui <- page_sidebar(
     DTOutput("tbl"),
     p(class = "small text-muted mt-2",
       sprintf("%s runs in the study area, built %s. Each trail is sampled every %d m; a sample counts as run when a track passes within the match distance. A trail is completed at %d%% of samples.",
-              fmt0(D$totals$runs_in_area), format(D$built), as.integer(D$params$node_spacing_m), round(100 * D$params$done_fraction)))
+              fmt0(D$totals$runs_in_area), format(D$built), as.integer(D$params$node_spacing_m), round(100 * D$params$done_fraction)),
+      if (trail_source == "osm") "Trail and park data \u00a9 OpenStreetMap contributors (ODbL)." else NULL)
   ),
   leafletOutput("map", height = "100%")
 )
@@ -168,6 +211,11 @@ server <- function(input, output, session) {
   })
 
   # ---- stats
+  output$subtitle <- renderText(if (nzchar(input$park)) input$park else "All parks")
+  output$s_pct_bar <- renderUI({
+    l <- sum(cov()$length_m); f <- if (l > 0) sum(cov()$done_m) / l else 0
+    div(class = "progress progress-thin", div(class = "progress-bar bg-light", style = sprintf("width: %.1f%%", 100 * f)))
+  })
   output$s_trail <- renderText(paste(fmt1(sum(cov()$length_m) / M_PER_MI), "mi"))
   output$s_done  <- renderText(paste(fmt1(sum(cov()$done_m) / M_PER_MI), "mi"))
   output$s_pct   <- renderText({ l <- sum(cov()$length_m); if (l > 0) pct(sum(cov()$done_m) / l) else "0%" })
@@ -217,7 +265,9 @@ server <- function(input, output, session) {
     }
     datatable(d, escape = FALSE, rownames = FALSE, selection = "single",
               options = list(pageLength = 15, dom = "tp", order = list(list(2, "asc")))) %>%
-      formatStyle("Done", color = styleInterval(c(0.5, 100 * D$params$done_fraction - 0.01), c(COL$todo, COL$partial, COL$done)), fontWeight = "500")
+      formatStyle("Done", color = styleInterval(c(0.5, 100 * D$params$done_fraction - 0.01), c(COL$todo, COL$partial, COL$done)), fontWeight = "500",
+                  background = styleColorBar(c(0, 100), "#dcefe4"), backgroundSize = "100% 70%",
+                  backgroundRepeat = "no-repeat", backgroundPosition = "center")
   })
 
   # row click: park view -> select the park; trail view -> zoom to the trail
@@ -348,6 +398,7 @@ server <- function(input, output, session) {
       addMapPane("parks", zIndex = 405) %>%
       addMapPane("trails", zIndex = 410) %>%
       addMapPane("runs", zIndex = 420) %>%
+      addMapPane("route", zIndex = 425) %>%
       addMapPane("highlight", zIndex = 430)
     for (nm in names(BASEMAPS)) {
       m <- addProviderTiles(m, BASEMAPS[[nm]], group = nm)
@@ -383,6 +434,85 @@ server <- function(input, output, session) {
     proxy <- leafletProxy("map")
     if (input$showruns) showGroup(proxy, "runs") else hideGroup(proxy, "runs")
   }, ignoreInit = TRUE)
+
+  # ---- route suggestion (off by default; park view only)
+  # The start is where most of your runs began, or a map click. The route is
+  # recomputed when the park, match distance, service-road setting, length or
+  # loop option changes; the length slider is debounced so dragging is smooth.
+  route_start <- reactiveVal(NULL)                 # projected x, y of a map click
+  observeEvent(input$park, route_start(NULL), ignoreInit = TRUE)
+  observeEvent(input$map_click, {
+    if (!isTRUE(input$route) || !nzchar(input$park)) return()
+    p <- st_transform(st_sfc(st_point(c(input$map_click$lng, input$map_click$lat)), crs = 4326), st_crs(trails_proj))
+    route_start(st_coordinates(p)[1, 1:2])
+  })
+
+  run_starts <- local({                           # first point of every run, projected, computed once
+    xy <- NULL
+    function() {
+      if (is.null(xy)) {
+        first <- runs_ll[!duplicated(runs_ll$activity_id), ]
+        if (!nrow(first)) return(xy <<- matrix(numeric(0), ncol = 2))
+        c0 <- st_coordinates(st_transform(first, st_crs(trails_proj)))
+        xy <<- c0[!duplicated(c0[, "L1"]), c("X", "Y"), drop = FALSE]
+      }
+      xy
+    }
+  })
+
+  route_mi <- debounce(reactive(input$route_mi), 600)
+
+  route <- reactive({
+    req(isTRUE(input$route), nzchar(input$park))
+    G <- build_route_graph(input$park, trails_proj, node_dist, RP$route_snap_m)
+    if (is.null(G)) return(NULL)
+    unrun <- vertex_unrun(G, node_dist, scope()$trail_id, input$thr)
+    start <- start_vertex(G, route_start(), run_starts())
+    r <- suggest_route(G, unrun, start, route_mi() * M_PER_MI, isTRUE(input$route_loop))
+    if (is.null(r)) return(list(none = TRUE))
+    r$ll <- st_coordinates(st_transform(st_sfc(st_linestring(r$xy), crs = st_crs(trails_proj)), 4326))[, 1:2]
+    r
+  })
+
+  observe({
+    proxy <- leafletProxy("map") %>% clearGroup("route")
+    if (!isTRUE(input$route) || !nzchar(input$park)) return()
+    r <- route()
+    if (is.null(r) || isTRUE(r$none)) return()
+    ll <- r$ll
+    proxy %>%
+      addPolylines(lng = ll[, 1], lat = ll[, 2], color = "#ffffff", weight = 8, opacity = 0.9, group = "route",
+                   options = pathOptions(pane = "route", interactive = FALSE)) %>%
+      addPolylines(lng = ll[, 1], lat = ll[, 2], color = COL$route, weight = 4, opacity = 0.95, group = "route",
+                   options = pathOptions(pane = "route", interactive = FALSE)) %>%
+      addCircleMarkers(lng = ll[1, 1], lat = ll[1, 2], radius = 7, color = "#ffffff", weight = 2, fillColor = COL$route,
+                       fillOpacity = 1, label = "Start", group = "route", options = pathOptions(pane = "route"))
+  })
+
+  output$route_info <- renderUI({
+    if (!nzchar(input$park)) return(p(class = "small text-muted", "Choose a park to get a route."))
+    r <- route()
+    if (is.null(r)) return(p(class = "small text-muted", "This park has no trails in the trail layer."))
+    if (isTRUE(r$none)) return(p(class = "small", "Nothing left to run within reach of this start. Try a longer route or another start."))
+    st <- r$steps[r$steps$len_m >= 50, ]
+    tagList(
+      p(class = "mb-1", strong(sprintf("%s mi %s", fmt1(r$length_m / M_PER_MI), if (r$loop) "loop" else "one way")),
+        sprintf(", %s mi of it new", fmt1(r$new_m / M_PER_MI))),
+      tags$ol(class = "route-steps",
+              lapply(seq_len(nrow(st)), function(i)
+                tags$li(sprintf("%s, %s mi%s", st$name[i], fmt1(st$len_m[i] / M_PER_MI),
+                                if (st$new_m[i] >= 50) sprintf(" (%s new)", fmt1(st$new_m[i] / M_PER_MI)) else "")))),
+      downloadButton("route_gpx", "GPX", class = "btn-sm")
+    )
+  })
+
+  output$route_gpx <- downloadHandler(
+    filename = function() sprintf("route_%s_%smi.gpx", gsub("[^A-Za-z0-9]+", "_", input$park), fmt1(route_mi())),
+    content = function(f) {
+      r <- route(); req(!is.null(r$ll))
+      write_gpx(r$ll, sprintf("%s, %s mi", input$park, fmt1(r$length_m / M_PER_MI)), f)
+    }
+  )
 }
 
 shinyApp(ui, server)

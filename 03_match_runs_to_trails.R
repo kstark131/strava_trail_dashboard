@@ -126,7 +126,10 @@ runs_ll <- runs_ll %>%
 app_data <- list(
   built        = Sys.Date(),
   params       = list(node_spacing_m = node_spacing_m, max_node_dist_m = max_node_dist_m,
-                      default_match_m = default_match_m, done_fraction = done_fraction),
+                      default_match_m = default_match_m, done_fraction = done_fraction,
+                      route_snap_m = route_snap_m, route_default_mi = route_default_mi,
+                      route_max_mi = route_max_mi),
+  trail_source = trail_source,                   # "osm" adds the OpenStreetMap credit in the app
   activities   = activities,
   totals       = list(runs = nrow(activities), miles = sum(activities$distance_mi, na.rm = TRUE),
                       runs_in_area = length(unique(run_lines$activity_id))),
