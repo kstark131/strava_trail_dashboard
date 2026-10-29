@@ -4,8 +4,9 @@
 # Run from the project folder:  shiny::runApp("app")
 # Reads data/app_data.rds written by 03_match_runs_to_trails.R.
 #
-# Layout: sidebar (park, match distance, toggles, stats, table) and a leaflet
-# map. Every input feeds the `cov()` reactive; everything else derives from it.
+# Layout: sidebar (park, match distance, map options, stats, table) and a
+# leaflet map. Every input feeds the `cov()` reactive; everything else derives
+# from it.
 
 library(shiny)
 library(bslib)
@@ -29,7 +30,23 @@ parks_ll    <- D$parks_ll
 runs_ll     <- D$runs_ll
 park_choices <- c("All parks" = "", sort(unique(trails_ll$park)))
 
-COL <- list(done = "#1c8a5a", partial = "#d9930f", todo = "#c4463b", run = "#3a5fcd", ink = "#1f2a26")
+COL <- list(done = "#1c8a5a", partial = "#d9930f", todo = "#c4463b", run = "#3a5fcd", ink = "#1f2a26",
+            trail = "#8a4b14", service = "#6b6b6b")
+
+# Basemaps offered in the layer control (top right). The first one is shown
+# when the app opens; reorder to change the default. All are free and need no
+# API key. Names are leaflet provider names: names(providers) lists them all.
+BASEMAPS <- c(
+  "Esri topo"        = "Esri.WorldTopoMap",
+  "Light"            = "CartoDB.Positron",
+  "Satellite"        = "Esri.WorldImagery",
+  "USGS topo"        = "USGS.USTopo",
+  "USGS imagery"     = "USGS.USImageryTopo",
+  "OpenTopoMap"      = "OpenTopoMap",
+  "OpenStreetMap"    = "OpenStreetMap.Mapnik",
+  "Shaded relief"    = "Esri.WorldShadedRelief",
+  "Dark"             = "CartoDB.DarkMatter"
+)
 
 # ------------------------------------------------------------------------------
 # helpers
@@ -41,8 +58,6 @@ pct <- function(f) {
 }
 cls  <- function(f) ifelse(f >= D$params$done_fraction, "done", ifelse(f > 0.005, "partial", "todo"))
 
-# Covered/uncovered pieces of a set of trails at a threshold. Node i covers the
-# bin [(i-1)/n, i/n] of the line, so runs of covered nodes become [from, to].
 # Covered/uncovered pieces of a set of trails at a threshold. Node i covers the
 # bin [(i-1)/n, i/n] of the line, so runs of covered nodes become [from, to].
 split_by_coverage <- function(ids, thr) {
@@ -57,20 +72,18 @@ split_by_coverage <- function(ids, thr) {
       tibble(covered = r$values, from = (starts - 1) / n, to = ends / n)
     }) %>%
     ungroup()
-  
+
   if (!nrow(iv)) return(NULL)
-  
+
   g <- st_geometry(trails_proj)[match(iv$trail_id, trails_proj$trail_id)]
-  
-  # Process st_linesubstring row-by-row to prevent vectorization errors
+
+  # st_linesubstring row by row (it does not vectorise over from/to)
   geom_list <- lapply(seq_len(nrow(iv)), function(i) {
     st_linesubstring(g[i], iv$from[i], iv$to[i])
   })
-  
-  pieces <- st_sf(iv, geometry = do.call(c, geom_list)) %>%
+
+  st_sf(iv, geometry = do.call(c, geom_list)) %>%
     st_transform(4326)
-  
-  pieces
 }
 
 # ------------------------------------------------------------------------------
@@ -83,8 +96,12 @@ ui <- page_sidebar(
     width = 400,
     selectInput("park", "Park", choices = park_choices, selected = ""),
     sliderInput("thr", "Match distance (m)", min = 5, max = 60, value = D$params$default_match_m, step = 5),
+    radioButtons("view", "Trail colours",
+                 choices = c("Completion (run / not run)" = "completion",
+                             "Plain trails (no run data)" = "plain"),
+                 selected = "completion"),
     checkboxInput("svc", "Include service roads", value = FALSE),
-    checkboxInput("showruns", "Show runs on map", value = FALSE),
+    checkboxInput("showruns", "Show my run tracks", value = FALSE),
     layout_columns(
       value_box("Miles run", textOutput("s_run"), p(textOutput("s_run_l", inline = TRUE), class = "small text-muted")),
       value_box("Trail miles", textOutput("s_trail")),
@@ -98,7 +115,7 @@ ui <- page_sidebar(
     DTOutput("tbl"),
     p(class = "small text-muted mt-2",
       sprintf("%s runs in the study area, built %s. Each trail is sampled every %d m; a sample counts as run when a track passes within the match distance. A trail is completed at %d%% of samples.",
-              fmt0(D$totals$runs_in_area), format(D$built), D$params$node_spacing_m, round(100 * D$params$done_fraction)))
+              fmt0(D$totals$runs_in_area), format(D$built), as.integer(D$params$node_spacing_m), round(100 * D$params$done_fraction)))
   ),
   leafletOutput("map", height = "100%")
 )
@@ -147,7 +164,7 @@ server <- function(input, output, session) {
                 trails_done = sum(frac >= D$params$done_fraction), .groups = "drop") %>%
       mutate(frac = done_m / length_m) %>%
       left_join(pr, by = "park") %>%
-      mutate(run_mi = coalesce(run_mi, 0), n_runs = coalesce(n_runs, 0L))
+      mutate(run_mi = coalesce(run_mi, 0), n_runs = coalesce(as.integer(n_runs), 0L))
   })
 
   # ---- stats
@@ -166,7 +183,7 @@ server <- function(input, output, session) {
   output$s_run_l <- renderText({
     if (nzchar(input$park)) {
       p <- parks_ll %>% st_drop_geometry() %>% filter(park == input$park)
-      n <- if (nrow(p)) coalesce(p$n_runs, 0L) else 0L
+      n <- if (nrow(p)) coalesce(as.integer(p$n_runs), 0L) else 0L
       if (nrow(p)) sprintf("inside the boundary, %s runs", fmt0(n)) else "no boundary polygon for this park"
     } else sprintf("all %s runs", fmt0(D$totals$runs))
   })
@@ -211,17 +228,20 @@ server <- function(input, output, session) {
     if (!nzchar(input$park)) {
       updateSelectInput(session, "park", selected = r$park)
     } else {
-      b <- st_bbox(filter(trails_ll, trail_id %in% r$ids[[1]]))
-      leafletProxy("map") %>% fitBounds(b[["xmin"]], b[["ymin"]], b[["xmax"]], b[["ymax"]])
       hl <- filter(trails_ll, trail_id %in% r$ids[[1]])
-      leafletProxy("map") %>% clearGroup("highlight") %>%
-        addPolylines(data = hl, color = "#ffffff", weight = 9, opacity = 0.9, group = "highlight") %>%
-        addPolylines(data = hl, color = COL$ink, weight = 3, opacity = 0.9, dashArray = "6 6", group = "highlight")
+      b <- st_bbox(hl)
+      leafletProxy("map") %>%
+        fitBounds(b[["xmin"]], b[["ymin"]], b[["xmax"]], b[["ymax"]]) %>%
+        clearGroup("highlight") %>%
+        addPolylines(data = hl, color = "#ffffff", weight = 9, opacity = 0.9, group = "highlight",
+                     options = pathOptions(pane = "highlight")) %>%
+        addPolylines(data = hl, color = COL$ink, weight = 3, opacity = 0.9, dashArray = "6 6", group = "highlight",
+                     options = pathOptions(pane = "highlight"))
     }
   })
 
   output$csv <- downloadHandler(
-    filename = function() sprintf("%s_%dm.csv", if (nzchar(input$park)) gsub("[^A-Za-z0-9]+", "_", input$park) else "all_parks", input$thr),
+    filename = function() sprintf("%s_%dm.csv", if (nzchar(input$park)) gsub("[^A-Za-z0-9]+", "_", input$park) else "all_parks", as.integer(input$thr)),
     content = function(f) {
       r <- table_rows()
       if (nzchar(input$park)) {
@@ -236,10 +256,41 @@ server <- function(input, output, session) {
   )
 
   # ---- map
+  # Layer groups: "Trails" and "Park boundaries" are toggles in the layer
+  # control; "runs" is toggled by the sidebar checkbox; "highlight" is the
+  # selected trail. Panes keep the stacking order fixed no matter which layer
+  # was redrawn last: park lines < trails < run tracks < highlight.
+
+  legend_for <- function(m, mode) {
+    m <- removeControl(m, "legend")
+    if (mode == "plain") {
+      addLegend(m, position = "bottomright", layerId = "legend", opacity = 0.9,
+                colors = c(COL$trail, COL$service, COL$run), labels = c("Trail", "Service road", "My run tracks"))
+    } else {
+      addLegend(m, position = "bottomright", layerId = "legend", opacity = 0.9,
+                colors = c(COL$done, COL$partial, COL$todo, COL$run),
+                labels = c("Run", "Partly run (overview)", "Not run", "My run tracks"))
+    }
+  }
+
   # draw_trails() works on both a fresh leaflet() object (initial render) and a
   # leafletProxy (updates), so the drawing code lives in one place.
-  draw_trails <- function(m, c_df, park, thr) {
-    if (nzchar(park)) {
+  draw_trails <- function(m, c_df, park, thr, mode) {
+    park_view <- nzchar(park)
+
+    if (mode == "plain") {
+      # trails only: one colour, service roads dashed, no completion data
+      t <- trails_ll %>% filter(trail_id %in% c_df$trail_id) %>%
+        mutate(label = sprintf("%s: %s mi%s", name, fmt1(length_m / M_PER_MI), ifelse(nzchar(surface), paste0(", ", surface), "")))
+      tr <- filter(t, !is_service); sv <- filter(t, is_service)
+      opts <- pathOptions(pane = "trails", interactive = park_view)
+      if (nrow(sv)) m <- addPolylines(m, data = sv, color = COL$service, weight = 2, opacity = 0.85, dashArray = "5 4",
+                                      smoothFactor = 0.5, label = if (park_view) ~label else NULL,
+                                      group = "Trails", options = opts)
+      if (nrow(tr)) m <- addPolylines(m, data = tr, color = COL$trail, weight = if (park_view) 3 else 2, opacity = 0.9,
+                                      smoothFactor = 0.5, label = if (park_view) ~label else NULL,
+                                      group = "Trails", options = opts)
+    } else if (park_view) {
       # park view: split each line into run and unrun pieces
       pieces <- split_by_coverage(c_df$trail_id, thr)
       if (!is.null(pieces)) {
@@ -248,12 +299,11 @@ server <- function(input, output, session) {
         pieces <- pieces %>% left_join(info, by = "trail_id") %>%
           mutate(label = sprintf("%s: %s of %s mi run", name, pct(gfrac), fmt1(glen / M_PER_MI)))
         todo <- filter(pieces, !covered); done <- filter(pieces, covered)
-        if (nrow(todo)) m <- addPolylines(m, data = todo, color = COL$todo, weight = 3, opacity = 0.8, label = ~label, group = "trails")
-        if (nrow(done)) m <- addPolylines(m, data = done, color = COL$done, weight = 4, opacity = 0.95, label = ~label, group = "trails")
+        if (nrow(todo)) m <- addPolylines(m, data = todo, color = COL$todo, weight = 3, opacity = 0.8, label = ~label,
+                                          smoothFactor = 0.5, group = "Trails", options = pathOptions(pane = "trails"))
+        if (nrow(done)) m <- addPolylines(m, data = done, color = COL$done, weight = 4, opacity = 0.95, label = ~label,
+                                          smoothFactor = 0.5, group = "Trails", options = pathOptions(pane = "trails"))
       }
-      pk <- filter(parks_ll, park == .env$park)
-      if (nrow(pk)) m <- addPolygons(m, data = pk, fill = FALSE, color = COL$ink, weight = 1.5, dashArray = "4 4",
-                                     group = "parks", options = pathOptions(interactive = FALSE))
     } else {
       # overview: whole segments coloured by class, no per-piece splitting (faster)
       t <- trails_ll %>% inner_join(select(c_df, trail_id, frac), by = "trail_id") %>% mutate(class = cls(frac))
@@ -261,12 +311,22 @@ server <- function(input, output, session) {
       for (k in c("todo", "partial", "done")) {
         tk <- filter(t, class == k)
         if (nrow(tk)) m <- addPolylines(m, data = tk, color = colours[[k]], weight = if (k == "done") 2.5 else 2,
-                                        opacity = 0.85, group = "trails", options = pathOptions(interactive = FALSE))
+                                        opacity = 0.85, group = "Trails",
+                                        options = pathOptions(pane = "trails", interactive = FALSE))
       }
-      m <- addPolygons(m, data = parks_ll, fill = FALSE, color = COL$ink, weight = 1, opacity = 0.35, dashArray = "4 4",
-                       group = "parks", options = pathOptions(interactive = FALSE))
     }
-    m
+
+    # park boundaries
+    if (park_view) {
+      pk <- filter(parks_ll, park == .env$park)
+      if (nrow(pk)) m <- addPolygons(m, data = pk, fill = FALSE, color = COL$ink, weight = 1.5, dashArray = "4 4",
+                                     group = "Park boundaries", options = pathOptions(pane = "parks", interactive = FALSE))
+    } else {
+      m <- addPolygons(m, data = parks_ll, fill = FALSE, color = COL$ink, weight = 1, opacity = 0.35, dashArray = "4 4",
+                       group = "Park boundaries", options = pathOptions(pane = "parks", interactive = FALSE))
+    }
+
+    legend_for(m, mode)
   }
 
   view_bbox <- function(park) {
@@ -285,26 +345,32 @@ server <- function(input, output, session) {
   output$map <- renderLeaflet({
     bb <- view_bbox(isolate(input$park))
     m <- leaflet(options = leafletOptions(preferCanvas = TRUE)) %>%
-      addProviderTiles(providers$Esri.WorldTopoMap, group = "Light") %>%
-      addProviderTiles(providers$OpenTopoMap, group = "Topo") %>%
-      addLayersControl(baseGroups = c("Light", "Topo"), position = "topright") %>%
-      addScaleBar(position = "bottomleft") %>%
-      addPolylines(data = runs_ll, color = COL$run, weight = 2, opacity = 0.45, group = "runs",
-                   options = pathOptions(interactive = FALSE)) %>%
-      addLegend(position = "bottomright", colors = c(COL$done, COL$todo, COL$run),
-                labels = c("Run", "Not run", "Run tracks"), opacity = 0.9) %>%
-      fitBounds(bb[["xmin"]], bb[["ymin"]], bb[["xmax"]], bb[["ymax"]])
-    
-    if (!isolate(input$showruns)) {
-      m <- hideGroup(m, "runs")
+      addMapPane("parks", zIndex = 405) %>%
+      addMapPane("trails", zIndex = 410) %>%
+      addMapPane("runs", zIndex = 420) %>%
+      addMapPane("highlight", zIndex = 430)
+    for (nm in names(BASEMAPS)) {
+      m <- addProviderTiles(m, BASEMAPS[[nm]], group = nm)
     }
-    
-    draw_trails(m, isolate(cov()), isolate(input$park), isolate(input$thr))
+    m <- m %>%
+      addLayersControl(baseGroups = names(BASEMAPS),
+                       overlayGroups = c("Trails", "Park boundaries"),
+                       position = "topright",
+                       options = layersControlOptions(collapsed = TRUE)) %>%
+      addScaleBar(position = "bottomleft") %>%
+      addPolylines(data = runs_ll, color = COL$run, weight = 2, opacity = 0.6, group = "runs",
+                   smoothFactor = 0.5, options = pathOptions(pane = "runs", interactive = FALSE)) %>%
+      fitBounds(bb[["xmin"]], bb[["ymin"]], bb[["xmax"]], bb[["ymax"]])
+
+    if (!isolate(input$showruns)) m <- hideGroup(m, "runs")
+
+    draw_trails(m, isolate(cov()), isolate(input$park), isolate(input$thr), isolate(input$view))
   })
-  # redraw trails and boundary when scope or threshold changes
-  observeEvent(list(input$park, input$thr, input$svc), {
-    proxy <- leafletProxy("map") %>% clearGroup("trails") %>% clearGroup("parks") %>% clearGroup("highlight")
-    draw_trails(proxy, cov(), input$park, input$thr)
+
+  # redraw trails and boundary when scope, threshold or colour mode changes
+  observeEvent(list(input$park, input$thr, input$svc, input$view), {
+    proxy <- leafletProxy("map") %>% clearGroup("Trails") %>% clearGroup("Park boundaries") %>% clearGroup("highlight")
+    draw_trails(proxy, cov(), input$park, input$thr, input$view)
   }, ignoreInit = TRUE)
 
   # zoom only when the park changes (not on every slider move)

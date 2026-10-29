@@ -23,6 +23,13 @@ trails     <- readRDS(file.path(dir_data, "trails.rds"))
 nodes      <- readRDS(file.path(dir_data, "nodes.rds"))
 parks      <- readRDS(file.path(dir_data, "parks.rds"))
 
+if (!"source" %in% names(streams)) streams$source <- "stream"
+src <- streams %>% distinct(activity_id, source) %>% count(source)
+message("Activities by track source: ", paste0(src$source, " = ", src$n, collapse = ", "))
+if (any(src$source == "summary")) {
+  message("  'summary' tracks are simplified polylines and match poorly. See 01_download.R.")
+}
+
 # ------------------------------------------------------------------------------
 # 1. RUN TRACKS AS LINES (in metres), split at GPS gaps
 # ------------------------------------------------------------------------------
@@ -44,6 +51,9 @@ track <- track %>%
   filter(any(x >= bb["xmin"] - 5000 & x <= bb["xmax"] + 5000 & y >= bb["ymin"] - 5000 & y <= bb["ymax"] + 5000)) %>%
   ungroup()
 
+message("Median spacing between track points: ", round(median(track$step, na.rm = TRUE), 1),
+        " m (full-resolution running tracks are 1 to 5 m)")
+
 pieces <- track %>%
   group_by(activity_id, piece) %>%
   filter(n() >= 2) %>%
@@ -51,7 +61,7 @@ pieces <- track %>%
 
 run_lines <- st_sf(
   activity_id = map_chr(pieces, ~ .x$activity_id[1]),
-  piece       = map_int(pieces, ~ .x$piece[1]),
+  piece       = map_int(pieces, ~ as.integer(.x$piece[1])),
   geometry    = st_sfc(map(pieces, ~ st_linestring(as.matrix(.x[, c("x", "y")]))), crs = crs_projected)
 )
 message(length(unique(run_lines$activity_id)), " activities in the study area")
@@ -78,7 +88,7 @@ node_dist <- nodes %>%
 cov <- node_dist %>% group_by(trail_id) %>% summarise(frac = mean(dist_m <= default_match_m), .groups = "drop") %>%
   inner_join(st_drop_geometry(trails), by = "trail_id")
 message(sprintf("At %d m: %.1f of %.1f trail miles run (%.1f%%), service roads excluded",
-                default_match_m,
+                as.integer(default_match_m),
                 sum(cov$frac * cov$length_m * !cov$is_service) / 1609.344,
                 sum(cov$length_m * !cov$is_service) / 1609.344,
                 100 * sum(cov$frac * cov$length_m * !cov$is_service) / sum(cov$length_m * !cov$is_service)))
@@ -95,7 +105,7 @@ park_runs <- tibble(
   n_runs = map_int(hits, ~ {
     if (!length(.x)) return(0L)
     tab <- table(run_pts$activity_id[.x])
-    sum(tab * run_densify_m >= 100)            # at least 100 m inside the park
+    as.integer(sum(tab * run_densify_m >= 100))            # at least 100 m inside the park
   }),
   run_ids = map(hits, ~ names(which(table(run_pts$activity_id[.x]) * run_densify_m >= 100)))
 )
@@ -103,8 +113,12 @@ park_runs <- tibble(
 # ------------------------------------------------------------------------------
 # 5. BUNDLE FOR THE APP (lat/lon for leaflet, metres kept for line splitting)
 # ------------------------------------------------------------------------------
-runs_ll <- run_lines %>%
-  st_simplify(dTolerance = 3) %>%                # lighter map layer; matching used the full data
+# The map layer is simplified by run_display_simplify_m (1 m by default) only to
+# keep leaflet responsive. Matching above used the unsimplified tracks. The old
+# version used 3 m here.
+runs_ll <- run_lines
+if (run_display_simplify_m > 0) runs_ll <- st_simplify(runs_ll, dTolerance = run_display_simplify_m)
+runs_ll <- runs_ll %>%
   st_transform(crs_global) %>%
   left_join(activities %>% select(id, run_name = name, date, distance_km = distance, distance_mi),
             by = c("activity_id" = "id"))

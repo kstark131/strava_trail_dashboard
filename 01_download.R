@@ -2,16 +2,22 @@
 # SCRIPT 1: DOWNLOAD FROM STRAVA
 # ==============================================================================
 # What changed versus the earlier version and why:
-#  * Trail matching now uses the full-resolution "latlng" stream (a point every
-#    second or so, 6 decimal places) instead of map.summary_polyline, which is a
-#    simplified line. The summary polyline is kept only as a fallback.
-#  * Streams are cached one file per activity in data/streams/. Re-running the
-#    script only fetches activities you have not downloaded yet, so a normal
-#    refresh is a handful of requests instead of hundreds.
+#  * Streams are now requested straight from the Strava API with no
+#    "resolution" parameter, which returns every recorded point. rStrava's
+#    get_activity_streams() always sends resolution = "high" with
+#    series_type = "distance", so Strava resampled the track instead of
+#    returning the raw recording. That, plus empty results being cached when
+#    rStrava's column names did not match, is the likely source of the
+#    simplified tracks. rStrava is still used for auth and the activity list.
+#  * Streams are cached one file per activity in data/streams_full/. Re-running
+#    the script only fetches activities you have not downloaded yet.
+#  * Only definite "no GPS" answers are cached as empty. Errors are not cached,
+#    so a failed request is retried next run instead of being stuck as empty.
 #  * Rate limits are handled: the script waits for the next 15-minute window
 #    when Strava returns 429 and then continues.
-#  * Coordinates are never rounded. If you export to JSON, use digits = NA
-#    (jsonlite rounds to 4 decimals by default, which is an 8 to 11 m error).
+#  * A resolution report at the end tells you whether the tracks are full
+#    resolution (point spacing of a few metres) or not.
+#  * Coordinates are never rounded. If you export to JSON, use digits = NA.
 #
 # Output: data/activities.rds (one row per activity)
 #         data/streams.rds    (one row per GPS point, all activities)
@@ -20,6 +26,8 @@ library(sf)
 library(dplyr)
 library(purrr)
 library(rStrava)
+library(httr)
+library(jsonlite)
 library(googlePolylines)
 
 source("00_config.R")
@@ -32,7 +40,7 @@ if (app_client_id == "" || app_secret == "") {
 # 1. AUTH
 # ------------------------------------------------------------------------------
 # strava_oauth caches the token in .httr-oauth in the project folder. Add that
-# file to .gitignore.
+# file to .gitignore. httr refreshes the token automatically when it expires.
 stoken <- httr::config(token = strava_oauth(app_name, app_client_id, app_secret,
                                             app_scope = "activity:read_all", cache = TRUE))
 
@@ -40,6 +48,9 @@ stoken <- httr::config(token = strava_oauth(app_name, app_client_id, app_secret,
 # 2. ACTIVITY LIST
 # ------------------------------------------------------------------------------
 apply_activity_filters <- function(df) {
+  if (!is.character(filter_start_date) || !is.character(filter_end_date)) {
+    stop("filter_start_date and filter_end_date in 00_config.R must be quoted, e.g. \"2025-11-15\".")
+  }
   if (nzchar(filter_start_date)) df <- filter(df, as.Date(start_date_local) >= as.Date(filter_start_date))
   if (nzchar(filter_end_date))   df <- filter(df, as.Date(start_date_local) <= as.Date(filter_end_date))
   if (length(target_activities)) df <- filter(df, type %in% target_activities)
@@ -59,27 +70,57 @@ activities <- compile_activities(my_acts, units = "metric") %>%   # distance in 
          distance_mi = distance / 1.609344) %>%
   arrange(desc(start_date_local))
 
-message(nrow(activities), " activities after filters; ", sum(activities$distance_mi), " mi total")
+message(nrow(activities), " activities after filters; ", round(sum(activities$distance_mi)), " mi total")
 
 # ------------------------------------------------------------------------------
-# 3. STREAMS (cached, incremental, rate-limit aware)
+# 3. STREAMS (full resolution, cached, incremental, rate-limit aware)
 # ------------------------------------------------------------------------------
 stream_types <- c("latlng", "time", "distance", "altitude", "grade_smooth")
+
+# One request to GET /activities/{id}/streams. Returns a data frame (possibly
+# with zero rows when the activity has no GPS), or signals an error.
+request_stream <- function(act_id) {
+  resp <- httr::GET(
+    sprintf("https://www.strava.com/api/v3/activities/%s/streams", act_id),
+    stoken,
+    query = list(keys = paste(stream_types, collapse = ","), key_by_type = "true")
+  )
+  status <- httr::status_code(resp)
+  if (status == 429) stop("429 Too Many Requests")
+  if (status == 404) return(data.frame())                     # no streams for this activity
+  if (status >= 400) stop("HTTP ", status, ": ", httr::content(resp, as = "text", encoding = "UTF-8"))
+
+  s <- jsonlite::fromJSON(httr::content(resp, as = "text", encoding = "UTF-8"), simplifyVector = TRUE)
+  ll <- s$latlng$data                                          # n x 2 matrix of lat, lng
+  if (is.null(ll) || length(ll) == 0) return(data.frame())    # treadmill, manual, GPS off
+  if (!is.matrix(ll)) ll <- do.call(rbind, ll)
+  n <- nrow(ll)
+
+  col <- function(k, scale = 1) {
+    v <- s[[k]]$data
+    if (is.null(v) || length(v) != n) rep(NA_real_, n) else as.numeric(v) * scale
+  }
+  out <- data.frame(
+    activity_id  = as.character(act_id),
+    lat          = ll[, 1],
+    lng          = ll[, 2],
+    time         = col("time"),               # seconds since start
+    distance     = col("distance", 1 / 1000), # API returns metres; stored in km as before
+    altitude     = col("altitude"),
+    grade_smooth = col("grade_smooth")
+  )
+  # What Strava says it sent: "high" with original_size == n means every point.
+  attr(out, "resolution")    <- s$latlng$resolution
+  attr(out, "original_size") <- s$latlng$original_size
+  out
+}
 
 fetch_stream <- function(act_id) {
   f <- file.path(dir_streams, paste0(act_id, ".rds"))
   if (file.exists(f)) return(readRDS(f))
   for (attempt in 1:3) {
-    res <- tryCatch(
-      get_activity_streams(my_acts, stoken, id = act_id, types = stream_types),
-      error = function(e) e
-    )
+    res <- tryCatch(request_stream(act_id), error = function(e) e)
     if (!inherits(res, "error")) {
-      if (is.null(res) || nrow(res) == 0 || !all(c("lat", "lng") %in% names(res))) {
-        res <- data.frame()                       # no GPS (treadmill etc.)
-      }
-      res <- as.data.frame(res)
-      if (nrow(res)) res$activity_id <- as.character(act_id)
       saveRDS(res, f)
       Sys.sleep(api_pause_sec)
       return(res)
@@ -93,7 +134,7 @@ fetch_stream <- function(act_id) {
       Sys.sleep(5)
     }
   }
-  NULL
+  NULL                                           # not cached, so it is retried next run
 }
 
 todo <- setdiff(activities$id, sub("\\.rds$", "", list.files(dir_streams, pattern = "\\.rds$")))
@@ -106,10 +147,10 @@ for (col in setdiff(expected_cols, names(streams_raw))) {
   streams_raw[[col]] <- rep(if (col == "activity_id") NA_character_ else NA_real_, nrow(streams_raw))
 }
 
-# Strava returns "time" as seconds since start and (in rStrava) distance in km.
-# Verify once: the last stream distance should be close to the activity distance.
+# Sanity check on units: the last stream distance should be close to the activity distance.
 if (nrow(streams_raw) > 0) {
-  chk <- streams_raw %>% group_by(activity_id) %>% summarise(stream_km = max(distance, na.rm = TRUE), .groups = "drop") %>%
+  chk <- streams_raw %>% group_by(activity_id) %>%
+    summarise(stream_km = suppressWarnings(max(distance, na.rm = TRUE)), .groups = "drop") %>%
     inner_join(select(activities, id, distance), by = c("activity_id" = "id"))
   ratio <- median(chk$stream_km / chk$distance, na.rm = TRUE)
   if (is.finite(ratio) && (ratio > 5 || ratio < 0.2)) {
@@ -166,7 +207,35 @@ if (dir.exists(dir_gpx) && length(list.files(dir_gpx, pattern = "\\.gpx$", ignor
 }
 
 # ------------------------------------------------------------------------------
-# 6. SAVE
+# 6. RESOLUTION REPORT
+# ------------------------------------------------------------------------------
+# Full-resolution running tracks have a point every 1 to 5 m. Summary polylines
+# and resampled streams are 20 m or more.
+xy_m <- streams %>%
+  st_as_sf(coords = c("lng", "lat"), crs = crs_global) %>%
+  st_transform(crs_projected) %>%
+  st_coordinates()
+spacing <- streams %>%
+  select(activity_id, source) %>%
+  mutate(x = xy_m[, 1], y = xy_m[, 2]) %>%
+  group_by(activity_id, source) %>%
+  summarise(n_pts = n(),
+            spacing_m = median(sqrt(diff(x)^2 + diff(y)^2)),
+            .groups = "drop")
+rep_tbl <- spacing %>%
+  group_by(source) %>%
+  summarise(activities = n(), median_points = median(n_pts), median_spacing_m = round(median(spacing_m, na.rm = TRUE), 1),
+            .groups = "drop")
+message("Track resolution by source:")
+print(rep_tbl)
+coarse <- filter(spacing, source == "stream", spacing_m > 10)
+if (nrow(coarse)) {
+  message(nrow(coarse), " stream activities have a median point spacing over 10 m. ",
+          "Delete their files in data/streams_full/ and re-run to fetch them again.")
+}
+
+# ------------------------------------------------------------------------------
+# 7. SAVE
 # ------------------------------------------------------------------------------
 saveRDS(activities, file.path(dir_data, "activities.rds"))
 saveRDS(streams,    file.path(dir_data, "streams.rds"))

@@ -10,16 +10,20 @@
 # work on any machine. Override dir_project if you keep scripts elsewhere.
 dir_project <- getwd()
 dir_data    <- file.path(dir_project, "data")           # RDS outputs of each script
-dir_streams <- file.path(dir_data, "streams")           # one RDS per activity (API cache)
+# One RDS per activity (API cache). The folder name changed from "streams" to
+# "streams_full" when the download switched to full-resolution requests, so old
+# (possibly downsampled) cache files are ignored and fetched again. Delete
+# data/streams/ once the new download has finished.
+dir_streams <- file.path(dir_data, "streams_full")
 dir_figures <- file.path(dir_project, "figures")
 dir_gpx     <- file.path(dir_project, "gpx")            # optional: Strava bulk export files
 
-# Trail and park layers. Shapefile (.shp) or GeoJSON (.geojson) both work.
+# Trail and park layers. Shapefile (.shp), a shapefile folder, or GeoJSON all work.
 # EBRPD publishes these on its GIS Open Data hub (linked from ebparks.org/maps).
 #path_trails <- "C:/Users/kstar/Desktop/strava/EBRPD_Roads_and_Trails_2536103029614549705/Roads_and_Trails-by_Access.shp"
 #path_parks  <- "C:/Users/kstar/Desktop/strava/EBRPD_Park_Boundaries_-5406634565931984723/Ebrparkp_m.shp"
 
-path_parks <- "/Users/kylestark/Desktop/R projects/strava_dashboard/EBRPD/EBRPD_Park_Boundaries_-7891795993450239876"
+path_parks  <- "/Users/kylestark/Desktop/R projects/strava_dashboard/EBRPD/EBRPD_Park_Boundaries_-7891795993450239876"
 path_trails <- "/Users/kylestark/Desktop/R projects/strava_dashboard/EBRPD/EBRPD_Roads_and_Trails_-1064327229162888676"
 
 
@@ -44,7 +48,9 @@ crs_projected <- 26910  # NAD83 / UTM zone 10N, metres. All distance work happen
 
 # --- ACTIVITY FILTERS ----------------------------------------------------------
 target_activities <- c("Run")            # e.g. c("Run", "Hike", "Walk")
-filter_start_date <- 2025-11-15                  # "" = no limit, or "2024-01-01"
+# Dates must be quoted strings. Unquoted, 2025-11-15 is arithmetic (= 1999) and
+# R reads it as a date in 1975, so the filter silently did nothing.
+filter_start_date <- "2025-11-15"        # "" = no limit
 filter_end_date   <- ""                  # "" = today
 min_distance_km   <- 0.5                 # drops accidental recordings
 ignore_keywords   <- c("treadmill", "indoor")
@@ -57,6 +63,13 @@ max_node_dist_m  <- 250   # nearest-run distance is capped here (keeps the table
 default_match_m  <- 15    # slider default in the app. 15 m suits full-res streams;
                           # use 30 m if you only have summary polylines.
 done_fraction    <- 0.90  # a trail is "completed" at this share of nodes run (CityStrides uses 90%)
+
+# --- MAP DISPLAY ---------------------------------------------------------------
+# Run tracks on the app map are simplified by this many metres to keep the map
+# responsive with full-resolution streams. Matching always uses unsimplified
+# data. 0 = no simplification (slow with hundreds of runs); 1 m is invisible
+# at any zoom level.
+run_display_simplify_m <- 1
 
 # --- STRAVA API ----------------------------------------------------------------
 # Never put the secret in this file. Add these three lines to your .Renviron
