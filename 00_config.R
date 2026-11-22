@@ -65,8 +65,8 @@ node_spacing_m   <- 10    # trail sample spacing. Each sample is one "node".
 run_densify_m    <- 5     # run tracks get a point at least this often
 run_gap_m        <- 200   # a jump longer than this between stream points is a GPS gap
 max_node_dist_m  <- 250   # nearest-run distance is capped here (keeps the table small)
-default_match_m  <- 15    # slider default in the app. 15 m suits full-res streams;
-                          # use 30 m if you only have summary polylines.
+default_match_m  <- 30    # slider default in the app. 30 m forgives GPS drift under trees
+                          # and offsets in the trail centrelines; 15 m is stricter.
 done_fraction    <- 0.90  # a trail is "completed" at this share of nodes run (CityStrides uses 90%)
 
 # --- MAP DISPLAY ---------------------------------------------------------------

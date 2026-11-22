@@ -14,7 +14,6 @@ library(leaflet)
 library(sf)
 library(dplyr)
 library(DT)
-library(lwgeom)     # st_linesubstring, used to draw run and unrun pieces of a trail
 source("route_suggest.R")
 
 sf_use_s2(FALSE)
@@ -78,32 +77,35 @@ pct <- function(f) {
 }
 cls  <- function(f) ifelse(f >= D$params$done_fraction, "done", ifelse(f > 0.005, "partial", "todo"))
 
-# Covered/uncovered pieces of a set of trails at a threshold. Node i covers the
-# bin [(i-1)/n, i/n] of the line, so runs of covered nodes become [from, to].
-split_by_coverage <- function(ids, thr) {
-  nd <- node_dist %>% filter(trail_id %in% ids) %>% arrange(trail_id, node_i)
-  iv <- nd %>%
-    group_by(trail_id) %>%
-    group_modify(~ {
-      cov <- .x$dist_m <= thr
-      r <- rle(c(cov))
-      ends <- cumsum(r$lengths); starts <- ends - r$lengths + 1
-      n <- length(cov)
-      tibble(covered = r$values, from = (starts - 1) / n, to = ends / n)
-    }) %>%
-    ungroup()
+# Part of a projected LINESTRING between fractions `from` and `to` of its length.
+line_substring <- function(l, from, to) {
+  p <- unclass(l)[, 1:2, drop = FALSE]
+  s <- c(0, cumsum(sqrt(rowSums(diff(p)^2)))); s <- s / s[length(s)]
+  ends <- cbind(approx(s, p[, 1], c(from, to), ties = list("ordered", mean))$y,
+                approx(s, p[, 2], c(from, to), ties = list("ordered", mean))$y)
+  st_linestring(rbind(ends[1, ], p[s > from & s < to, , drop = FALSE], ends[2, ]))
+}
 
-  if (!nrow(iv)) return(NULL)
-
-  g <- st_geometry(trails_proj)[match(iv$trail_id, trails_proj$trail_id)]
-
-  # st_linesubstring row by row (it does not vectorise over from/to)
-  geom_list <- lapply(seq_len(nrow(iv)), function(i) {
-    st_linesubstring(g[i], iv$from[i], iv$to[i])
-  })
-
-  st_sf(iv, geometry = do.call(c, geom_list)) %>%
-    st_transform(4326)
+# Run and unrun pieces of every trail at a threshold (lat/lon). Node i covers
+# the bin [(i-1)/n, i/n] of the line, so runs of covered nodes become
+# [from, to]. Segments that are all run or all unrun keep their geometry; only
+# mixed ones are cut. Cached per threshold, since the overview needs them all.
+piece_cache <- new.env()
+coverage_pieces <- function(thr) {
+  key <- as.character(thr)
+  if (is.null(piece_cache[[key]])) {
+    nd  <- node_dist[order(node_dist$trail_id, node_dist$node_i), ]
+    cov <- nd$dist_m <= thr
+    brk <- c(TRUE, diff(nd$trail_id) != 0 | diff(cov) != 0)       # first node of each run
+    last <- c(which(brk)[-1] - 1L, nrow(nd))                        # last node of each run
+    iv <- data.frame(trail_id = nd$trail_id[brk], covered = cov[brk],
+                     from = (nd$node_i[brk] - 1) / nd$n_nodes[brk], to = nd$node_i[last] / nd$n_nodes[brk])
+    g <- st_geometry(trails_proj)[match(iv$trail_id, trails_proj$trail_id)]
+    geoms <- unclass(g)
+    for (i in which(iv$from > 0 | iv$to < 1)) geoms[[i]] <- line_substring(g[[i]], iv$from[i], iv$to[i])
+    piece_cache[[key]] <- st_transform(st_sf(iv, geometry = st_sfc(geoms, crs = st_crs(trails_proj))), 4326)
+  }
+  piece_cache[[key]]
 }
 
 # ------------------------------------------------------------------------------
@@ -124,7 +126,8 @@ ui <- page_sidebar(
       accordion_panel(
         "Map options",
         radioButtons("view", "Trail colours",
-                     choices = c("Completion (run / not run)" = "completion",
+                     choices = c("Run / not run" = "completion",
+                                 "By trail: completed, partly run, not run" = "classes",
                                  "Plain trails (no run data)" = "plain"),
                      selected = "completion"),
         checkboxInput("showruns", "Show my run tracks", value = FALSE)
@@ -316,10 +319,13 @@ server <- function(input, output, session) {
     if (mode == "plain") {
       addLegend(m, position = "bottomright", layerId = "legend", opacity = 0.9,
                 colors = c(COL$trail, COL$service, COL$run), labels = c("Trail", "Service road", "My run tracks"))
-    } else {
+    } else if (mode == "classes") {
       addLegend(m, position = "bottomright", layerId = "legend", opacity = 0.9,
                 colors = c(COL$done, COL$partial, COL$todo, COL$run),
-                labels = c("Run", "Partly run (overview)", "Not run", "My run tracks"))
+                labels = c("Trail completed", "Trail partly run", "Trail not run", "My run tracks"))
+    } else {
+      addLegend(m, position = "bottomright", layerId = "legend", opacity = 0.9,
+                colors = c(COL$done, COL$todo, COL$run), labels = c("Run", "Not run yet", "My run tracks"))
     }
   }
 
@@ -340,29 +346,39 @@ server <- function(input, output, session) {
       if (nrow(tr)) m <- addPolylines(m, data = tr, color = COL$trail, weight = if (park_view) 3 else 2, opacity = 0.9,
                                       smoothFactor = 0.5, label = if (park_view) ~label else NULL,
                                       group = "Trails", options = opts)
-    } else if (park_view) {
-      # park view: split each line into run and unrun pieces
-      pieces <- split_by_coverage(c_df$trail_id, thr)
-      if (!is.null(pieces)) {
+    } else if (mode == "completion") {
+      # where you have run (muted) and, on top, where you have not (highlighted);
+      # no partly-run class: each trail is cut where your coverage stops
+      pieces <- coverage_pieces(thr) %>% filter(trail_id %in% c_df$trail_id)
+      if (park_view) {
         g <- c_df %>% group_by(park, name) %>% summarise(gfrac = sum(done_m) / sum(length_m), glen = sum(length_m), .groups = "drop")
         info <- st_drop_geometry(trails_ll) %>% select(trail_id, name, park) %>% inner_join(g, by = c("name", "park"))
         pieces <- pieces %>% left_join(info, by = "trail_id") %>%
           mutate(label = sprintf("%s: %s of %s mi run", name, pct(gfrac), fmt1(glen / M_PER_MI)))
-        todo <- filter(pieces, !covered); done <- filter(pieces, covered)
-        if (nrow(todo)) m <- addPolylines(m, data = todo, color = COL$todo, weight = 3, opacity = 0.8, label = ~label,
-                                          smoothFactor = 0.5, group = "Trails", options = pathOptions(pane = "trails"))
-        if (nrow(done)) m <- addPolylines(m, data = done, color = COL$done, weight = 4, opacity = 0.95, label = ~label,
-                                          smoothFactor = 0.5, group = "Trails", options = pathOptions(pane = "trails"))
+        opts <- pathOptions(pane = "trails")
+      } else {
+        # overview: one multi-line per class keeps the browser fast with every park on screen
+        pieces <- pieces %>% group_by(covered) %>% summarise(do_union = FALSE, .groups = "drop")
+        opts <- pathOptions(pane = "trails", interactive = FALSE)
       }
+      done <- filter(pieces, covered); todo <- filter(pieces, !covered)
+      lab <- if (park_view) ~label else NULL
+      if (nrow(done)) m <- addPolylines(m, data = done, color = COL$done, weight = if (park_view) 3 else 2, opacity = 0.7,
+                                        label = lab, smoothFactor = 0.5, group = "Trails", options = opts)
+      if (nrow(todo)) m <- addPolylines(m, data = todo, color = COL$todo, weight = if (park_view) 4 else 2.5, opacity = 0.95,
+                                        label = lab, smoothFactor = 0.5, group = "Trails", options = opts)
     } else {
-      # overview: whole segments coloured by class, no per-piece splitting (faster)
-      t <- trails_ll %>% inner_join(select(c_df, trail_id, frac), by = "trail_id") %>% mutate(class = cls(frac))
+      # by trail: whole segments coloured by their named trail's share run
+      # (completed / partly run / not run). Park view keeps hover labels.
+      g <- c_df %>% group_by(park, name) %>% summarise(gfrac = sum(done_m) / sum(length_m), glen = sum(length_m), .groups = "drop")
+      t <- trails_ll %>% filter(trail_id %in% c_df$trail_id) %>% inner_join(g, by = c("park", "name")) %>%
+        mutate(class = cls(gfrac), label = sprintf("%s: %s of %s mi run", name, pct(gfrac), fmt1(glen / M_PER_MI)))
       colours <- c(done = COL$done, partial = COL$partial, todo = COL$todo)
       for (k in c("todo", "partial", "done")) {
         tk <- filter(t, class == k)
-        if (nrow(tk)) m <- addPolylines(m, data = tk, color = colours[[k]], weight = if (k == "done") 2.5 else 2,
-                                        opacity = 0.85, group = "Trails",
-                                        options = pathOptions(pane = "trails", interactive = FALSE))
+        if (nrow(tk)) m <- addPolylines(m, data = tk, color = colours[[k]], weight = if (park_view) 3.5 else if (k == "done") 2.5 else 2,
+                                        opacity = 0.85, label = if (park_view) ~label else NULL, smoothFactor = 0.5, group = "Trails",
+                                        options = pathOptions(pane = "trails", interactive = park_view))
       }
     }
 

@@ -21,7 +21,7 @@ docs/HOSTING.md                   options and a roadmap for putting the app onli
 1. Open `strava_trail_dashboard.Rproj` in RStudio so relative paths resolve.
 2. Install packages:
    ```r
-   install.packages(c("sf", "lwgeom", "dplyr", "purrr", "stringr", "tidyverse", "rStrava", "httr",
+   install.packages(c("sf", "dplyr", "purrr", "stringr", "tidyverse", "rStrava", "httr",
                       "googlePolylines", "RANN", "igraph", "shiny", "bslib", "leaflet", "DT", "jsonlite"))
    ```
    `bslib` needs version 0.6 or later for `value_box(theme = ...)`.
@@ -75,6 +75,17 @@ automatically, so OSM works outside the Bay Area too. OSM trail names and park
 boundaries are less consistent than an agency layer, and many paths have no
 name ("Unnamed trail"). The app credits OpenStreetMap when this source is used.
 
+## Map colours, November 2026
+
+"Trail colours" now defaults to **Run / not run**: every trail is cut where your
+coverage stops, the parts you have run are drawn in muted green, and the parts
+you have not are drawn on top in red, in both the overview and a single park.
+There is no "partly run" colour in this mode. The old three-way view is still
+there as **By trail: completed, partly run, not run**, which colours each whole
+named trail by its share run. The cutting is done in the app without `lwgeom`
+(which is no longer needed) and is cached per match distance, so the first draw
+at a new distance takes about a second and later ones are instant.
+
 ## Look and layout, October 2026
 
 Warmer page and sidebar colours, the park name next to the title, a progress
@@ -121,7 +132,7 @@ Even at full resolution, a track will usually sit a few metres off the mapped tr
 
 Each trail segment is sampled every 10 m (`nodes`). Each run is turned into a line, split at GPS gaps over 200 m, densified to a point every 5 m, and indexed with a KD-tree (`RANN::nn2`). Every node stores the distance to the nearest run point. The app applies the match-distance slider to those stored distances, so changing the threshold is instant and needs no rebuild. A named trail (same name inside the same park) is completed when 90% or more of its length is within the threshold.
 
-With full-resolution streams, 15 m is a sensible default. With summary polylines only, use 30 m.
+The default is 30 m (`default_match_m`), which forgives GPS drift under trees and offsets in the trail centrelines. 15 m is stricter and suits full-resolution streams in open country.
 
 ## The app, and where to start changing it
 

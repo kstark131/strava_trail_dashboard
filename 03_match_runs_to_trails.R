@@ -133,7 +133,7 @@ app_data <- list(
   activities   = activities,
   totals       = list(runs = nrow(activities), miles = sum(activities$distance_mi, na.rm = TRUE),
                       runs_in_area = length(unique(run_lines$activity_id))),
-  trails_proj  = trails,                         # metres, for st_linesubstring
+  trails_proj  = trails,                         # metres, for cutting run / unrun pieces
   trails_ll    = st_transform(trails, crs_global),
   node_dist    = node_dist,
   parks_ll     = parks %>% st_simplify(dTolerance = 5) %>% st_transform(crs_global) %>%
