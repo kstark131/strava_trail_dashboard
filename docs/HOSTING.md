@@ -3,10 +3,30 @@
 Nothing here is implemented yet. The goal is "not public, but reachable by me
 and a few people I choose, from anywhere".
 
+## Chosen: shinyapps.io with a login (set up, November 2026)
+
+`deploy_shinyapps.R` does the deploy; its header has the one-time setup.
+
+- **Access:** the URL itself is public, so the app's own login screen
+  (`shinymanager`, password from `APP_PASSWORD`) is what keeps it private.
+  Use a long password you don't use elsewhere. shinyapps.io's built-in
+  authentication is a paid feature, so it isn't used.
+- **Privacy:** the upload drops run names and dates and cuts run tracks within
+  `privacy_radius_m` of each point in `privacy_zones`. Set at least your home.
+- **Free-plan limits to check** on shinyapps.io's pricing page before relying
+  on it: the number of apps, monthly active hours, and instance memory. The app
+  bundle is about 12 MB of data and should fit a small instance; it sleeps when
+  idle and takes a few seconds to wake.
+- **Edits online don't persist:** shinyapps.io discards files written by the
+  app on restart. The app detects shinyapps.io (`R_CONFIG_ACTIVE`), hides Save
+  and offers Download instead.
+- **If it outgrows the free plan:** the same app runs unchanged on Posit Connect
+  Cloud, or in a container on a small VPS (Phase 2 below).
+
 ## What actually needs hosting
 
-Only the Shiny app: `app/app.R`, `app/route_suggest.R` and
-`data/app_data.rds`. The pipeline (01 to 03) needs your Strava secret and token,
+Only the Shiny app: `app/app.R`, `app/route_suggest.R`, `app/exclusions.R`,
+`app/exclusions.geojson` and `data/app_data.rds`. The pipeline (01 to 03) needs your Strava secret and token,
 so keep running it on your own machine at first and upload the finished
 `app_data.rds`. Never deploy `.Renviron`, `.httr-oauth`, `data/streams_full/` or
 `gpx/`.

@@ -6,7 +6,11 @@
 #
 # Layout: sidebar (park, match distance, map options, route suggestion, stats,
 # table) and a leaflet map. Every input feeds the `cov()` reactive; everything
-# else derives from it. Route suggestions live in route_suggest.R.
+# else derives from it. Route suggestions live in route_suggest.R, exclusions
+# in exclusions.R.
+#
+# Set APP_PASSWORD (and optionally APP_USER) in the environment to put a login
+# screen in front of the app; deploy_shinyapps.R does this for the hosted copy.
 
 library(shiny)
 library(bslib)
@@ -14,8 +18,8 @@ library(leaflet)
 library(sf)
 library(dplyr)
 library(DT)
-library(lwgeom)     # st_linesubstring, used to draw run and unrun pieces of a trail
 source("route_suggest.R")
+source("exclusions.R")
 
 sf_use_s2(FALSE)
 M_PER_MI <- 1609.344
@@ -31,12 +35,25 @@ parks_ll    <- D$parks_ll
 runs_ll     <- D$runs_ll
 park_choices <- c("All parks" = "", sort(unique(trails_ll$park)))
 
-# route settings come from 00_config.R via app_data; defaults for older bundles
-RP <- modifyList(list(route_snap_m = 15, route_default_mi = 5, route_max_mi = 20), as.list(D$params))
+# route and exclusion settings come from 00_config.R via app_data; defaults for older bundles
+RP <- modifyList(list(route_snap_m = 15, route_default_mi = 5, route_max_mi = 20,
+                      exclude_rules_default = c("closed_land", "closed", "proposed"),
+                      rule_closed_pattern = "closed|no public|not open|golf|private road",
+                      rule_proposed_pattern = "proposed|future trail", rule_road_types = "Paved Road"),
+                 as.list(D$params))
 trail_source <- if (is.null(D$trail_source)) "file" else D$trail_source
 
+# exclusion rules are evaluated once; the switches only choose which apply
+HITS <- rule_hits(trails_proj, RP, OUTSIDE)
+rule_mi <- vapply(HITS, function(h) sum(trails_proj$length_m[h & !trails_proj$is_service]) / M_PER_MI, 0)
+rule_choices <- setNames(names(RULE_LABELS), sprintf("%s (%s mi)", RULE_LABELS, formatC(rule_mi, format = "f", digits = 1)))
+rule_choices <- rule_choices[rule_mi > 0 | names(rule_choices) %in% RP$exclude_rules_default]
+# On shinyapps.io files written by the app vanish on restart, so edits there are
+# downloaded instead of saved.
+HOSTED <- Sys.getenv("R_CONFIG_ACTIVE") == "shinyapps"
+
 COL <- list(done = "#1c8a5a", partial = "#d9930f", todo = "#c4463b", run = "#3a5fcd", ink = "#1f2a26",
-            trail = "#8a4b14", service = "#6b6b6b", route = "#6a2c91")
+            trail = "#8a4b14", service = "#6b6b6b", route = "#6a2c91", excluded = "#8f8f8f", draft = "#d1006f")
 
 # A few rules on top of the bslib theme: a warm off-white page, softer cards,
 # a tidy accordion and legend.
@@ -78,32 +95,35 @@ pct <- function(f) {
 }
 cls  <- function(f) ifelse(f >= D$params$done_fraction, "done", ifelse(f > 0.005, "partial", "todo"))
 
-# Covered/uncovered pieces of a set of trails at a threshold. Node i covers the
-# bin [(i-1)/n, i/n] of the line, so runs of covered nodes become [from, to].
-split_by_coverage <- function(ids, thr) {
-  nd <- node_dist %>% filter(trail_id %in% ids) %>% arrange(trail_id, node_i)
-  iv <- nd %>%
-    group_by(trail_id) %>%
-    group_modify(~ {
-      cov <- .x$dist_m <= thr
-      r <- rle(c(cov))
-      ends <- cumsum(r$lengths); starts <- ends - r$lengths + 1
-      n <- length(cov)
-      tibble(covered = r$values, from = (starts - 1) / n, to = ends / n)
-    }) %>%
-    ungroup()
+# Part of a projected LINESTRING between fractions `from` and `to` of its length.
+line_substring <- function(l, from, to) {
+  p <- unclass(l)[, 1:2, drop = FALSE]
+  s <- c(0, cumsum(sqrt(rowSums(diff(p)^2)))); s <- s / s[length(s)]
+  ends <- cbind(approx(s, p[, 1], c(from, to), ties = list("ordered", mean))$y,
+                approx(s, p[, 2], c(from, to), ties = list("ordered", mean))$y)
+  st_linestring(rbind(ends[1, ], p[s > from & s < to, , drop = FALSE], ends[2, ]))
+}
 
-  if (!nrow(iv)) return(NULL)
-
-  g <- st_geometry(trails_proj)[match(iv$trail_id, trails_proj$trail_id)]
-
-  # st_linesubstring row by row (it does not vectorise over from/to)
-  geom_list <- lapply(seq_len(nrow(iv)), function(i) {
-    st_linesubstring(g[i], iv$from[i], iv$to[i])
-  })
-
-  st_sf(iv, geometry = do.call(c, geom_list)) %>%
-    st_transform(4326)
+# Run and unrun pieces of every trail at a threshold (lat/lon). Node i covers
+# the bin [(i-1)/n, i/n] of the line, so runs of covered nodes become
+# [from, to]. Segments that are all run or all unrun keep their geometry; only
+# mixed ones are cut. Cached per threshold, since the overview needs them all.
+piece_cache <- new.env()
+coverage_pieces <- function(thr) {
+  key <- as.character(thr)
+  if (is.null(piece_cache[[key]])) {
+    nd  <- node_dist[order(node_dist$trail_id, node_dist$node_i), ]
+    cov <- nd$dist_m <= thr
+    brk <- c(TRUE, diff(nd$trail_id) != 0 | diff(cov) != 0)       # first node of each run
+    last <- c(which(brk)[-1] - 1L, nrow(nd))                        # last node of each run
+    iv <- data.frame(trail_id = nd$trail_id[brk], covered = cov[brk],
+                     from = (nd$node_i[brk] - 1) / nd$n_nodes[brk], to = nd$node_i[last] / nd$n_nodes[brk])
+    g <- st_geometry(trails_proj)[match(iv$trail_id, trails_proj$trail_id)]
+    geoms <- unclass(g)
+    for (i in which(iv$from > 0 | iv$to < 1)) geoms[[i]] <- line_substring(g[[i]], iv$from[i], iv$to[i])
+    piece_cache[[key]] <- st_transform(st_sf(iv, geometry = st_sfc(geoms, crs = st_crs(trails_proj))), 4326)
+  }
+  piece_cache[[key]]
 }
 
 # ------------------------------------------------------------------------------
@@ -124,7 +144,8 @@ ui <- page_sidebar(
       accordion_panel(
         "Map options",
         radioButtons("view", "Trail colours",
-                     choices = c("Completion (run / not run)" = "completion",
+                     choices = c("Run / not run" = "completion",
+                                 "By trail: completed, partly run, not run" = "classes",
                                  "Plain trails (no run data)" = "plain"),
                      selected = "completion"),
         checkboxInput("showruns", "Show my run tracks", value = FALSE)
@@ -140,6 +161,30 @@ ui <- page_sidebar(
           p(class = "small text-muted",
             "Starts where most of your runs here began. Click the map to move the start."),
           uiOutput("route_info")
+        )
+      ),
+      accordion_panel(
+        "Exclusions",
+        checkboxGroupInput("rules", "Leave out of the totals", choices = rule_choices,
+                           selected = intersect(RP$exclude_rules_default, rule_choices)),
+        checkboxInput("edit", "Review and edit on the map", value = FALSE),
+        conditionalPanel(
+          "input.edit",
+          radioButtons("edit_tool", NULL,
+                       choices = c("Tap a trail to exclude or restore it" = "segment",
+                                   "Tap points to outline an area to exclude" = "area")),
+          selectInput("edit_reason", "Reason for new exclusions", choices = EXCL_REASONS),
+          conditionalPanel(
+            "input.edit_tool == 'area'",
+            div(class = "d-flex gap-2 mb-2",
+                actionButton("area_done", "Finish area", class = "btn-sm btn-primary"),
+                actionButton("area_clear", "Clear points", class = "btn-sm"))
+          ),
+          uiOutput("excl_info"),
+          div(class = "d-flex gap-2",
+              if (!HOSTED) actionButton("excl_save", "Save", class = "btn-sm btn-primary"),
+              actionButton("excl_undo", "Undo last", class = "btn-sm"),
+              downloadButton("excl_dl", "Download", class = "btn-sm"))
         )
       )
     ),
@@ -168,13 +213,21 @@ ui <- page_sidebar(
 # ------------------------------------------------------------------------------
 server <- function(input, output, session) {
 
-  # trails in scope for the current park and service-road setting
-  scope <- reactive({
+  # ---- exclusions: rules switched on, plus your own edits (exclusions.R)
+  manual <- reactiveVal(read_exclusions())
+  history <- reactiveVal(list())                       # earlier states, for "Undo last"
+  set_manual <- function(x) { history(c(history(), list(manual()))); manual(x) }
+  excl <- reactive(apply_exclusions(trails_proj, HITS, input$rules, manual()))
+
+  # trails for the current park and service-road setting, before and after exclusions
+  in_view <- reactive({
     t <- trails_ll
     if (!input$svc) t <- filter(t, !is_service)
     if (nzchar(input$park)) t <- filter(t, park == input$park)
     t
   })
+  scope <- reactive(filter(in_view(), !trail_id %in% excl()$trail_id))
+  excluded_view <- reactive(in_view() %>% inner_join(excl(), by = "trail_id"))
 
   # coverage fraction per trail segment at the current threshold
   cov <- reactive({
@@ -316,17 +369,24 @@ server <- function(input, output, session) {
     if (mode == "plain") {
       addLegend(m, position = "bottomright", layerId = "legend", opacity = 0.9,
                 colors = c(COL$trail, COL$service, COL$run), labels = c("Trail", "Service road", "My run tracks"))
+    } else if (mode == "classes") {
+      addLegend(m, position = "bottomright", layerId = "legend", opacity = 0.9,
+                colors = c(COL$done, COL$partial, COL$todo, COL$excluded, COL$run),
+                labels = c("Trail completed", "Trail partly run", "Trail not run", "Excluded", "My run tracks"))
     } else {
       addLegend(m, position = "bottomright", layerId = "legend", opacity = 0.9,
-                colors = c(COL$done, COL$partial, COL$todo, COL$run),
-                labels = c("Run", "Partly run (overview)", "Not run", "My run tracks"))
+                colors = c(COL$done, COL$todo, COL$excluded, COL$run), labels = c("Run", "Not run yet", "Excluded", "My run tracks"))
     }
   }
 
   # draw_trails() works on both a fresh leaflet() object (initial render) and a
   # leafletProxy (updates), so the drawing code lives in one place.
-  draw_trails <- function(m, c_df, park, thr, mode) {
+  # In edit mode (park view only) every piece gets a layerId, so a tap on the
+  # map reports which segment it was: "seg_<trail_id>_<n>" or "ex_<trail_id>".
+  draw_trails <- function(m, c_df, park, thr, mode, ex = NULL, edit = FALSE) {
     park_view <- nzchar(park)
+    edit <- edit && park_view
+    if (edit) mode <- "completion"
 
     if (mode == "plain") {
       # trails only: one colour, service roads dashed, no completion data
@@ -340,29 +400,57 @@ server <- function(input, output, session) {
       if (nrow(tr)) m <- addPolylines(m, data = tr, color = COL$trail, weight = if (park_view) 3 else 2, opacity = 0.9,
                                       smoothFactor = 0.5, label = if (park_view) ~label else NULL,
                                       group = "Trails", options = opts)
-    } else if (park_view) {
-      # park view: split each line into run and unrun pieces
-      pieces <- split_by_coverage(c_df$trail_id, thr)
-      if (!is.null(pieces)) {
+    } else if (mode == "completion") {
+      # where you have run (muted) and, on top, where you have not (highlighted);
+      # no partly-run class: each trail is cut where your coverage stops
+      pieces <- coverage_pieces(thr) %>% filter(trail_id %in% c_df$trail_id)
+      if (park_view) {
         g <- c_df %>% group_by(park, name) %>% summarise(gfrac = sum(done_m) / sum(length_m), glen = sum(length_m), .groups = "drop")
         info <- st_drop_geometry(trails_ll) %>% select(trail_id, name, park) %>% inner_join(g, by = c("name", "park"))
         pieces <- pieces %>% left_join(info, by = "trail_id") %>%
           mutate(label = sprintf("%s: %s of %s mi run", name, pct(gfrac), fmt1(glen / M_PER_MI)))
-        todo <- filter(pieces, !covered); done <- filter(pieces, covered)
-        if (nrow(todo)) m <- addPolylines(m, data = todo, color = COL$todo, weight = 3, opacity = 0.8, label = ~label,
-                                          smoothFactor = 0.5, group = "Trails", options = pathOptions(pane = "trails"))
-        if (nrow(done)) m <- addPolylines(m, data = done, color = COL$done, weight = 4, opacity = 0.95, label = ~label,
-                                          smoothFactor = 0.5, group = "Trails", options = pathOptions(pane = "trails"))
+        opts <- pathOptions(pane = "trails")
+      } else {
+        # overview: one multi-line per class keeps the browser fast with every park on screen
+        pieces <- pieces %>% group_by(covered) %>% summarise(do_union = FALSE, .groups = "drop")
+        opts <- pathOptions(pane = "trails", interactive = FALSE)
       }
+      if (edit) pieces <- mutate(pieces, label = paste0(label, ". Tap to exclude"),
+                                 lid = paste0("seg_", trail_id, "_", seq_len(n())))
+      done <- filter(pieces, covered); todo <- filter(pieces, !covered)
+      lab <- if (park_view) ~label else NULL
+      if (nrow(done)) m <- addPolylines(m, data = done, color = COL$done, weight = if (edit) 6 else if (park_view) 3 else 2,
+                                        opacity = 0.7, label = lab, layerId = if (edit) done$lid else NULL,
+                                        smoothFactor = 0.5, group = "Trails", options = opts)
+      if (nrow(todo)) m <- addPolylines(m, data = todo, color = COL$todo, weight = if (edit) 6 else if (park_view) 4 else 2.5,
+                                        opacity = 0.95, label = lab, layerId = if (edit) todo$lid else NULL,
+                                        smoothFactor = 0.5, group = "Trails", options = opts)
     } else {
-      # overview: whole segments coloured by class, no per-piece splitting (faster)
-      t <- trails_ll %>% inner_join(select(c_df, trail_id, frac), by = "trail_id") %>% mutate(class = cls(frac))
+      # by trail: whole segments coloured by their named trail's share run
+      # (completed / partly run / not run). Park view keeps hover labels.
+      g <- c_df %>% group_by(park, name) %>% summarise(gfrac = sum(done_m) / sum(length_m), glen = sum(length_m), .groups = "drop")
+      t <- trails_ll %>% filter(trail_id %in% c_df$trail_id) %>% inner_join(g, by = c("park", "name")) %>%
+        mutate(class = cls(gfrac), label = sprintf("%s: %s of %s mi run", name, pct(gfrac), fmt1(glen / M_PER_MI)))
       colours <- c(done = COL$done, partial = COL$partial, todo = COL$todo)
       for (k in c("todo", "partial", "done")) {
         tk <- filter(t, class == k)
-        if (nrow(tk)) m <- addPolylines(m, data = tk, color = colours[[k]], weight = if (k == "done") 2.5 else 2,
-                                        opacity = 0.85, group = "Trails",
-                                        options = pathOptions(pane = "trails", interactive = FALSE))
+        if (nrow(tk)) m <- addPolylines(m, data = tk, color = colours[[k]], weight = if (park_view) 3.5 else if (k == "done") 2.5 else 2,
+                                        opacity = 0.85, label = if (park_view) ~label else NULL, smoothFactor = 0.5, group = "Trails",
+                                        options = pathOptions(pane = "trails", interactive = park_view))
+      }
+    }
+
+    # excluded segments: grey and dashed, on their own toggle in the layer control
+    if (!is.null(ex) && nrow(ex) && mode != "plain") {
+      if (park_view) {
+        ex <- mutate(ex, label = sprintf("%s: excluded (%s)%s", name, reason, if (edit) ". Tap to restore" else ""))
+        m <- addPolylines(m, data = ex, color = COL$excluded, weight = if (edit) 6 else 3, opacity = 0.85, dashArray = "6 5",
+                          label = ~label, layerId = if (edit) paste0("ex_", ex$trail_id) else NULL,
+                          smoothFactor = 0.5, group = "Excluded", options = pathOptions(pane = "trails"))
+      } else {
+        m <- addPolylines(m, data = st_sf(geometry = st_combine(st_geometry(ex))), color = COL$excluded, weight = 2,
+                          opacity = 0.8, dashArray = "4 4", smoothFactor = 0.5, group = "Excluded",
+                          options = pathOptions(pane = "trails", interactive = FALSE))
       }
     }
 
@@ -405,7 +493,7 @@ server <- function(input, output, session) {
     }
     m <- m %>%
       addLayersControl(baseGroups = names(BASEMAPS),
-                       overlayGroups = c("Trails", "Park boundaries"),
+                       overlayGroups = c("Trails", "Excluded", "Park boundaries"),
                        position = "topright",
                        options = layersControlOptions(collapsed = TRUE)) %>%
       addScaleBar(position = "bottomleft") %>%
@@ -415,13 +503,15 @@ server <- function(input, output, session) {
 
     if (!isolate(input$showruns)) m <- hideGroup(m, "runs")
 
-    draw_trails(m, isolate(cov()), isolate(input$park), isolate(input$thr), isolate(input$view))
+    draw_trails(m, isolate(cov()), isolate(input$park), isolate(input$thr), isolate(input$view),
+                isolate(excluded_view()), isolate(isTRUE(input$edit)))
   })
 
   # redraw trails and boundary when scope, threshold or colour mode changes
-  observeEvent(list(input$park, input$thr, input$svc, input$view), {
-    proxy <- leafletProxy("map") %>% clearGroup("Trails") %>% clearGroup("Park boundaries") %>% clearGroup("highlight")
-    draw_trails(proxy, cov(), input$park, input$thr, input$view)
+  observeEvent(list(input$park, input$thr, input$svc, input$view, excl(), input$edit), {
+    proxy <- leafletProxy("map") %>% clearGroup("Trails") %>% clearGroup("Excluded") %>%
+      clearGroup("Park boundaries") %>% clearGroup("highlight")
+    draw_trails(proxy, cov(), input$park, input$thr, input$view, excluded_view(), isTRUE(input$edit))
   }, ignoreInit = TRUE)
 
   # zoom only when the park changes (not on every slider move)
@@ -442,7 +532,7 @@ server <- function(input, output, session) {
   route_start <- reactiveVal(NULL)                 # projected x, y of a map click
   observeEvent(input$park, route_start(NULL), ignoreInit = TRUE)
   observeEvent(input$map_click, {
-    if (!isTRUE(input$route) || !nzchar(input$park)) return()
+    if (!isTRUE(input$route) || !nzchar(input$park) || isTRUE(input$edit)) return()   # taps edit exclusions instead
     p <- st_transform(st_sfc(st_point(c(input$map_click$lng, input$map_click$lat)), crs = 4326), st_crs(trails_proj))
     route_start(st_coordinates(p)[1, 1:2])
   })
@@ -467,8 +557,9 @@ server <- function(input, output, session) {
     G <- build_route_graph(input$park, trails_proj, node_dist, RP$route_snap_m)
     if (is.null(G)) return(NULL)
     unrun <- vertex_unrun(G, node_dist, scope()$trail_id, input$thr)
-    start <- start_vertex(G, route_start(), run_starts())
-    r <- suggest_route(G, unrun, start, route_mi() * M_PER_MI, isTRUE(input$route_loop))
+    blocked <- excl()$trail_id[excl()$blocking]                 # closed or private: never walk these
+    start <- start_vertex(G, route_start(), run_starts(), blocked)
+    r <- suggest_route(G, unrun, start, route_mi() * M_PER_MI, isTRUE(input$route_loop), blocked)
     if (is.null(r)) return(list(none = TRUE))
     r$ll <- st_coordinates(st_transform(st_sfc(st_linestring(r$xy), crs = st_crs(trails_proj)), 4326))[, 1:2]
     r
@@ -506,6 +597,79 @@ server <- function(input, output, session) {
     )
   })
 
+  # ---- editing exclusions (park view; see exclusions.R for the file format)
+  observeEvent(input$edit, {
+    if (isTRUE(input$edit) && !nzchar(input$park))
+      showNotification("Choose a park to edit its exclusions.", type = "message")
+  })
+
+  observeEvent(input$map_shape_click, {
+    id <- input$map_shape_click$id
+    if (!isTRUE(input$edit) || input$edit_tool != "segment" || is.null(id) || !grepl("^(seg|ex)_", id)) return()
+    tid <- as.integer(sub("^[a-z]+_([0-9]+).*$", "\\1", id))
+    seg <- trails_ll[trails_ll$trail_id == tid, ]
+    set_manual(toggle_segment(manual(), seg, tid %in% excl()$trail_id, input$edit_reason))
+  })
+
+  area_pts <- reactiveVal(matrix(numeric(0), ncol = 2))
+  observeEvent(input$map_click, {
+    if (!isTRUE(input$edit) || input$edit_tool != "area" || !nzchar(input$park)) return()
+    area_pts(rbind(area_pts(), c(input$map_click$lng, input$map_click$lat)))
+  })
+  observeEvent(list(input$area_clear, input$park, input$edit, input$edit_tool), area_pts(matrix(numeric(0), ncol = 2)),
+               ignoreInit = TRUE)
+  observeEvent(input$area_done, {
+    p <- area_pts()
+    if (nrow(p) < 3) return(showNotification("Tap at least three points around the area first.", type = "warning"))
+    poly <- st_sfc(st_polygon(list(rbind(p, p[1, ]))), crs = 4326)
+    set_manual(rbind(manual(), st_sf(kind = "area", action = "exclude", uid = NA_character_, reason = input$edit_reason,
+                                     name = "", park = input$park, added = format(Sys.Date()), geometry = poly)))
+    area_pts(matrix(numeric(0), ncol = 2))
+  })
+
+  # the outline being drawn, and saved areas while editing
+  observe({
+    proxy <- leafletProxy("map") %>% clearGroup("draft")
+    if (!isTRUE(input$edit) || !nzchar(input$park)) return()
+    a <- manual()[manual()$kind == "area" & manual()$park %in% input$park, ]
+    if (nrow(a)) proxy <- addPolygons(proxy, data = a, color = COL$excluded, weight = 1.5, fillOpacity = 0.15,
+                                      label = ~paste("Excluded area:", reason), group = "draft",
+                                      options = pathOptions(pane = "parks", interactive = FALSE))
+    p <- area_pts()
+    if (nrow(p)) {
+      if (nrow(p) > 1) proxy <- addPolylines(proxy, lng = c(p[, 1], p[1, 1]), lat = c(p[, 2], p[1, 2]), color = COL$draft,
+                                             weight = 2, dashArray = "4 4", group = "draft", options = pathOptions(pane = "highlight"))
+      addCircleMarkers(proxy, lng = p[, 1], lat = p[, 2], radius = 5, color = COL$draft, fillOpacity = 1, weight = 1,
+                       group = "draft", options = pathOptions(pane = "highlight"))
+    }
+  })
+
+  observeEvent(input$excl_undo, {
+    h <- history(); if (!length(h)) return()
+    manual(h[[length(h)]]); history(h[-length(h)])
+  })
+  observeEvent(input$excl_save, {
+    write_exclusions(manual())
+    history(list())
+    showNotification(sprintf("Saved %d exclusions to app/%s", nrow(manual()), EXCL_FILE), type = "message")
+  })
+  output$excl_dl <- downloadHandler(
+    filename = function() EXCL_FILE,
+    content = function(f) write_exclusions(manual(), f)
+  )
+
+  output$excl_info <- renderUI({
+    e <- excluded_view(); m <- manual()
+    unsaved <- length(history()) > 0
+    tagList(
+      p(class = "small mb-1", sprintf("%s mi excluded here (%d segments); %d of your own edits%s.",
+                                     fmt1(sum(e$length_m) / M_PER_MI), nrow(e), nrow(m),
+                                     if (unsaved) ", not saved yet" else "")),
+      if (HOSTED) p(class = "small text-muted",
+                    "Edits on the hosted app last until it restarts. Download the file, put it in app/ and redeploy to keep them.")
+    )
+  })
+
   output$route_gpx <- downloadHandler(
     filename = function() sprintf("route_%s_%smi.gpx", gsub("[^A-Za-z0-9]+", "_", input$park), fmt1(route_mi())),
     content = function(f) {
@@ -513,6 +677,20 @@ server <- function(input, output, session) {
       write_gpx(r$ll, sprintf("%s, %s mi", input$park, fmt1(r$length_m / M_PER_MI)), f)
     }
   )
+}
+
+# Optional login screen. APP_PASSWORD (and APP_USER, default "me") come from
+# the environment: .Renviron locally, or the copy deploy_shinyapps.R bundles.
+if (nzchar(Sys.getenv("APP_PASSWORD"))) {
+  library(shinymanager)
+  credentials <- data.frame(user = Sys.getenv("APP_USER", "me"), password = Sys.getenv("APP_PASSWORD"),
+                            stringsAsFactors = FALSE)
+  ui <- secure_app(ui)
+  app_server <- server
+  server <- function(input, output, session) {
+    secure_server(check_credentials = check_credentials(credentials))
+    app_server(input, output, session)
+  }
 }
 
 shinyApp(ui, server)

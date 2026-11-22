@@ -42,9 +42,12 @@ trail_park_field    <- "PARK_NAME"
 trail_type_field    <- "TYPE_NEW"
 trail_access_field  <- "ACCESS"
 trail_surface_field <- "SURFACE"
+trail_uid_field     <- "GlobalID"   # stable feature id; saved exclusions refer to it
+trail_notes_field   <- "NOTES"      # free text searched by the exclusion rules
 park_name_field     <- "NAME"
 park_status_field   <- "STATUS"
 park_acres_field    <- "GIS_ACRES"
+park_closed_status  <- "Landbank"   # park_status_field values for land not open to the public
 
 # --- PROJECTIONS ---------------------------------------------------------------
 crs_global    <- 4326   # WGS84 lat/lon, what Strava and leaflet use
@@ -65,8 +68,8 @@ node_spacing_m   <- 10    # trail sample spacing. Each sample is one "node".
 run_densify_m    <- 5     # run tracks get a point at least this often
 run_gap_m        <- 200   # a jump longer than this between stream points is a GPS gap
 max_node_dist_m  <- 250   # nearest-run distance is capped here (keeps the table small)
-default_match_m  <- 15    # slider default in the app. 15 m suits full-res streams;
-                          # use 30 m if you only have summary polylines.
+default_match_m  <- 30    # slider default in the app. 30 m forgives GPS drift under trees
+                          # and offsets in the trail centrelines; 15 m is stricter.
 done_fraction    <- 0.90  # a trail is "completed" at this share of nodes run (CityStrides uses 90%)
 
 # --- MAP DISPLAY ---------------------------------------------------------------
@@ -100,6 +103,18 @@ route_snap_m       <- 15
 route_default_mi   <- 5       # starting value of the length slider
 route_max_mi       <- 20      # slider maximum
 
+# --- EXCLUSIONS (app) -------------------------------------------------------------
+# Trails to leave out of the completion numbers. The app has a switch for each
+# rule; these are on when it opens. Rules: "closed_land" (segment lies only on
+# park_closed_status land), "closed" (name or notes match rule_closed_pattern),
+# "proposed" (match rule_proposed_pattern), "paved_road" (type in
+# rule_road_types), "outside" (outside every park boundary). Segments and areas
+# you exclude by hand are saved in app/exclusions.geojson.
+exclude_rules_default <- c("closed_land", "closed", "proposed")
+rule_closed_pattern   <- "closed|no public|not open|golf|private road"
+rule_proposed_pattern <- "proposed|future trail"
+rule_road_types       <- c("Paved Road")
+
 # --- OPENSTREETMAP (trail_source = "osm") ----------------------------------------
 # Only this box is downloaded, in tiles, one request at a time, and cached in
 # data/osm/. The public Overpass servers are shared and run on donations:
@@ -112,6 +127,16 @@ osm_tile_deg       <- 0.05    # tile size in degrees (about 5 km)
 osm_cache_days     <- 90      # tiles younger than this are not downloaded again
 osm_pause_sec      <- 5       # wait between tile requests
 osm_overpass_url   <- "https://overpass-api.de/api/interpreter"
+
+# --- SHINYAPPS.IO (deploy_shinyapps.R) ---------------------------------------------
+# The login (APP_USER / APP_PASSWORD) goes in .Renviron, never here.
+deploy_app_name       <- "trail-dashboard"   # URL becomes <account>.shinyapps.io/trail-dashboard
+# Run tracks within privacy_radius_m of these lon/lat points are cut out of the
+# online copy (the local app is unchanged). Add home, work, anywhere you start
+# often. Example: list(c(-122.2700, 37.8700))
+privacy_zones         <- list()
+privacy_radius_m      <- 400
+deploy_run_simplify_m <- 3                   # lighter run tracks online; matching is unaffected
 
 # --- OPTIONAL OUTPUTS ----------------------------------------------------------
 upload_to_gdrive <- FALSE      # 04_static_figures.R only
@@ -129,6 +154,9 @@ if (trail_source == "osm") {
   park_name_field     <- "name"
   park_status_field   <- "status"
   park_acres_field    <- "acres"
+  trail_uid_field     <- "osm_id"
+  trail_notes_field   <- ""
+  park_closed_status  <- ""
   # OSM can be anywhere, so use the WGS84 UTM zone of the box instead of 10N
   crs_projected <- 32600 + floor((mean(osm_bbox[c("xmin", "xmax")]) + 180) / 6) + 1 +
                    ifelse(mean(osm_bbox[c("ymin", "ymax")]) < 0, 100, 0)

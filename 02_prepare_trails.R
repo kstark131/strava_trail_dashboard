@@ -49,6 +49,12 @@ parks_raw <- st_read(path_parks, quiet = TRUE) %>%
   st_transform(crs_projected) %>%
   st_make_valid()
 
+# land held but not open to the public (EBRPD "Landbank"), kept apart before
+# parks are unioned by name, since one park can have open and landbanked parts
+park_status_raw <- col_or(parks_raw, park_status_field)
+closed_land <- if (nzchar(park_closed_status)) parks_raw[park_status_raw %in% park_closed_status, ] else parks_raw[0, ]
+open_land   <- parks_raw[!park_status_raw %in% park_closed_status, ]
+
 parks <- parks_raw %>%
   mutate(park   = col_or(parks_raw, park_name_field),
          status = col_or(parks_raw, park_status_field),
@@ -70,14 +76,23 @@ trails_raw <- st_read(path_trails, quiet = TRUE) %>%
   st_transform(crs_projected)
 
 trails <- trails_raw %>%
-  mutate(name      = first_nonempty(trails_raw, trail_name_fields),
+  mutate(src       = row_number(),                # source feature, for a stable uid below
+         uid_src   = col_or(trails_raw, trail_uid_field),
+         notes     = col_or(trails_raw, trail_notes_field),
+         name      = first_nonempty(trails_raw, trail_name_fields),
          park_attr = col_or(trails_raw, trail_park_field),
          type      = col_or(trails_raw, trail_type_field),
          access    = col_or(trails_raw, trail_access_field),
          surface   = col_or(trails_raw, trail_surface_field)) %>%
-  select(name, park_attr, type, access, surface) %>%
+  select(src, uid_src, notes, name, park_attr, type, access, surface) %>%
   st_cast("MULTILINESTRING") %>%
-  st_cast("LINESTRING", warn = FALSE)               # one row per part
+  st_cast("LINESTRING", warn = FALSE) %>%           # one row per part
+  group_by(src) %>% mutate(part = row_number()) %>% ungroup()
+
+# uid: the layer's own feature id plus the part number, so saved exclusions
+# survive a fresh download of the layer. Without an id field it falls back to
+# the row number, which only lasts until the layer changes.
+trails$uid <- paste0(ifelse(nzchar(trails$uid_src), trails$uid_src, paste0("row", trails$src)), ":", trails$part)
 
 trails$trail_id <- seq_len(nrow(trails))
 trails$length_m <- as.numeric(st_length(trails))
@@ -137,9 +152,15 @@ trails <- trails %>%
            !is.na(park_name_match)         ~ park_name_match,
            park_attr != ""                 ~ park_attr,
            TRUE                            ~ "Outside park boundaries")) %>%
-  select(trail_id, park, name, type, access, surface, length_m, is_service, park_attr)
+  select(trail_id, uid, park, name, type, access, surface, notes, length_m, is_service, park_attr)
 
-message(sum(trails$park == "Outside park boundaries"), " segments outside any park boundary")
+# segments whose middle lies on closed land and not on open land
+in_closed <- if (nrow(closed_land)) lengths(st_intersects(mid_nodes, st_union(closed_land))) > 0 else rep(FALSE, nrow(mid_nodes))
+in_open   <- lengths(st_intersects(mid_nodes, st_union(open_land))) > 0
+trails$in_closed_land <- (in_closed & !in_open)[match(trails$trail_id, mid_nodes$trail_id)]
+
+message(sum(trails$park == "Outside park boundaries"), " segments outside any park boundary, ",
+        sum(trails$in_closed_land), " on closed (", paste(park_closed_status, collapse = "/"), ") land only")
 
 # ------------------------------------------------------------------------------
 # 5. SAVE
