@@ -12,6 +12,9 @@ An R port of the trail dashboard, split into scripts you can change one at a tim
 90_export_json_for_html_dashboard.R  writes strava_Run.json for the Python/HTML version (optional)
 app/app.R                         the Shiny dashboard
 app/route_suggest.R               route suggestions (sourced by app.R)
+app/exclusions.R                  exclusion rules and your saved edits (sourced by app.R)
+app/exclusions.geojson            trails and areas you excluded by hand (created when you first save)
+deploy_shinyapps.R                uploads the app to shinyapps.io behind a password
 run_all.R                         runs the pipeline (skipping unchanged steps) and starts the app
 docs/HOSTING.md                   options and a roadmap for putting the app online
 ```
@@ -35,6 +38,58 @@ docs/HOSTING.md                   options and a roadmap for putting the app onli
    `path_trails` and `path_parks` in `00_config.R`; to use OpenStreetMap, see below.
 5. `source("run_all.R")`, or run the scripts in order. `run_all.R` skips
    `02_prepare_trails.R` when the layers and config have not changed since it last ran.
+
+## Excluding private and closed trails
+
+Open "Exclusions" in the sidebar. Excluded trails leave every total, the table
+and the CSV, and are drawn grey and dashed (with their own switch in the layer
+control).
+
+**Rules** use the trail layer's own data. Each has a switch, and the ones in
+`exclude_rules_default` (`00_config.R`) start on. Miles are for the EBRPD layers,
+service roads not counted:
+
+| rule | what it matches | miles | on by default |
+| --- | --- | --- | --- |
+| Land not open to the public | segment lies only on park land with STATUS "Landbank" | 30 | yes |
+| Notes say closed / golf course | name or NOTES match `rule_closed_pattern` | ~10 | yes |
+| Notes say proposed / future trail | `rule_proposed_pattern` | ~10 | yes |
+| Paved roads | TYPE_NEW in `rule_road_types` | 60 | no |
+| Outside park boundaries | no park polygon contains the segment | 253 | no |
+
+**Your own edits.** Choose a park and tick "Review and edit on the map".
+Trails become thick and tappable (green run, red not run, grey excluded):
+
+- Tap a trail to exclude it with the chosen reason; tap a grey one to bring it
+  back, including ones a rule excluded. Tapping again undoes the tap.
+- Choose "outline an area", tap points around private land or a golf course,
+  then "Finish area": segments at least half inside are excluded.
+- "Undo last" steps back; "Save" writes `app/exclusions.geojson`.
+
+Segments are saved by the layer's own feature id (`trail_uid_field`, EBRPD's
+GlobalID), so edits survive a fresh download of the trail layer. Commit the
+file to keep it. Route suggestions never use trails excluded by hand, on closed
+land, or marked closed or proposed; paved roads and trails outside parks stay
+usable as connectors.
+
+## Online with shinyapps.io
+
+`deploy_shinyapps.R` uploads the app with a login screen. The one-time setup is
+at the top of that file: install `rsconnect` and `shinymanager`, connect your
+shinyapps.io account, put `APP_USER` / `APP_PASSWORD` in `.Renviron`, and set
+`privacy_zones` in `00_config.R` (run tracks within `privacy_radius_m` of those
+points are cut from the online copy). Then, after each refresh:
+
+```r
+source("run_all.R")            # or just 01 and 03
+source("deploy_shinyapps.R")
+```
+
+The upload has the app code, your exclusions and a trimmed copy of
+`app_data.rds` (no run names or dates). Your Strava secret and raw streams
+never leave your machine. Exclusion edits made on the hosted app last only
+until it restarts, so use Download there, put the file in `app/` and deploy
+again. See `docs/HOSTING.md` for the free-plan limits to check.
 
 ## Route suggestions
 
@@ -166,7 +221,8 @@ Every output reads from one of those reactives, so a new filter only has to be a
 | streams_full/*.rds | 01 | API cache, one file per activity |
 | streams.rds | 01 | one row per GPS point: activity_id, lat, lng, time (s), distance (km), altitude, grade_smooth, source |
 | osm/trails.geojson, osm/parks.geojson | 02a | OSM trails and parks (trail_source = "osm"); osm/cache/ holds the raw tile responses |
-| trails.rds | 02 | sf LINESTRING per segment, UTM 10N metres, with park, name, type, access, surface, length_m, is_service |
+| app/exclusions.geojson | app | your saved exclusions (in `app/`, not `data/`, so it is committed and deployed) |
+| trails.rds | 02 | sf LINESTRING per segment, UTM 10N metres, with uid, park, name, type, access, surface, notes, length_m, is_service, in_closed_land |
 | nodes.rds | 02 | sf POINT per sample node: trail_id, node_i, n_nodes |
 | parks.rds | 02 | sf polygon per park, unioned by name |
 | node_dist.rds | 03 | trail_id, node_i, dist_m |

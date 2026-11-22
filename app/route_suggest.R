@@ -89,10 +89,13 @@ vertex_unrun <- function(G, node_dist, scope_ids, thr) {
 
 # vertex to start from: nearest to (x, y) if given, else to the most common
 # place your runs started (rounded to 250 m), else to the middle of the
-# largest connected piece of the park's trail network.
-start_vertex <- function(G, xy = NULL, run_starts = NULL) {
+# largest connected piece of the park's trail network. Never a vertex on an
+# `avoid` (blocked) segment, from which no route could leave.
+start_vertex <- function(G, xy = NULL, run_starts = NULL, avoid = integer(0)) {
   vt <- G$verts
-  big <- vt$v[G$comp == as.integer(names(which.max(table(G$comp))))]
+  ok <- vt$v[!vt$trail_id %in% avoid]
+  if (!length(ok)) ok <- vt$v
+  big <- intersect(vt$v[G$comp == as.integer(names(which.max(table(G$comp[ok]))))], ok)
   if (is.null(xy) && length(run_starts) && nrow(run_starts)) {
     near <- RANN::nn2(vt[big, c("x", "y")], run_starts, k = 1)$nn.dists[, 1] < 2000
     if (any(near)) {
@@ -102,11 +105,14 @@ start_vertex <- function(G, xy = NULL, run_starts = NULL) {
     }
   }
   if (is.null(xy)) return(big[RANN::nn2(vt[big, c("x", "y")], t(colMeans(vt[big, c("x", "y")])), k = 1)$nn.idx[1]])
-  RANN::nn2(vt[, c("x", "y")], matrix(xy, ncol = 2), k = 1)$nn.idx[1]
+  ok[RANN::nn2(vt[ok, c("x", "y")], matrix(xy, ncol = 2), k = 1)$nn.idx[1]]
 }
 
-suggest_route <- function(G, unrun, start, target_m, loop = TRUE) {
+# `blocked`: trail_ids the route must not use (closed or private). Their edges
+# get a prohibitive length, so no route within the target can include them.
+suggest_route <- function(G, unrun, start, target_m, loop = TRUE, blocked = integer(0)) {
   g <- G$g; ed <- G$edges; vt <- G$verts
+  if (length(blocked)) E(g)$weight <- ifelse(ed$trail_id %in% blocked, 1e9, ed$len)
   gain <- ed$len * (unrun[ed$from] + unrun[ed$to]) / 2      # unrun metres per edge
 
   # candidate stretches: runs of consecutive unrun edges along one segment
