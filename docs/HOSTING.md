@@ -3,25 +3,33 @@
 Nothing here is implemented yet. The goal is "not public, but reachable by me
 and a few people I choose, from anywhere".
 
-## Chosen: shinyapps.io with a login (set up, November 2026)
+## Chosen: Posit Connect Cloud with a login (November 2026)
 
-`deploy_shinyapps.R` does the deploy; its header has the one-time setup.
+`deploy_connect_cloud.R` publishes with `rsconnect::deployApp()`, following
+Posit's guide (https://docs.posit.co/connect-cloud/how-to/r/shiny-r.html). Its
+header has the one-time setup. Notes from Posit's documentation:
 
-- **Access:** the URL itself is public, so the app's own login screen
-  (`shinymanager`, password from `APP_PASSWORD`) is what keeps it private.
-  Use a long password you don't use elsewhere. shinyapps.io's built-in
-  authentication is a paid feature, so it isn't used.
+- **shinyapps.io is being folded into Connect Cloud.** Free shinyapps.io apps
+  are migrated automatically from January 28, 2027, so publishing straight to
+  Connect Cloud avoids a second move.
+- **Free plan = public.** Public access can't be turned off on Free or Basic,
+  and individual accounts list their content on a public profile page
+  (connect.posit.cloud/<account>). Search engines are asked not to index it by
+  default. Private link sharing needs the Enhanced plan. So the app's own login
+  (`shinymanager`) is what keeps it private on the free plan.
+- **Secrets:** APP_USER / APP_PASSWORD go in the content's Settings >
+  Variables (encrypted), read with `Sys.getenv()`. Nothing secret is uploaded.
+  The hosted copy refuses to show any data until APP_PASSWORD is set.
+- **Dependencies:** the command-line method needs no `manifest.json` or
+  `renv.lock`; rsconnect records the packages installed on your machine.
+  Publishing from GitHub would need one of those files and, on the free plan,
+  a public repository, so it isn't used here (the data is private).
 - **Privacy:** the upload drops run names and dates and cuts run tracks within
   `privacy_radius_m` of each point in `privacy_zones`. Set at least your home.
-- **Free-plan limits to check** on shinyapps.io's pricing page before relying
-  on it: the number of apps, monthly active hours, and instance memory. The app
-  bundle is about 12 MB of data and should fit a small instance; it sleeps when
-  idle and takes a few seconds to wake.
-- **Edits online don't persist:** shinyapps.io discards files written by the
-  app on restart. The app detects shinyapps.io (`R_CONFIG_ACTIVE`), hides Save
-  and offers Download instead.
-- **If it outgrows the free plan:** the same app runs unchanged on Posit Connect
-  Cloud, or in a container on a small VPS (Phase 2 below).
+- **Edits online don't persist:** exclusion edits made on the hosted app are
+  lost on restart; the app hides Save there and offers Download.
+- **Compute:** memory and CPU are set per app under Settings > Compute, within
+  the plan's limits. The data bundle is about 12 MB.
 
 ## What actually needs hosting
 
@@ -44,7 +52,7 @@ out of `app_data`, since the app only uses the totals.
 | --- | --- | --- | --- | --- |
 | **Tailscale** on the machine that runs the app today | people you invite to your tailnet | free for personal use | 30 min | Nothing is exposed to the internet. Each viewer installs Tailscale. Your computer has to be on. |
 | **Cloudflare Tunnel + Cloudflare Access** in front of the same machine | anyone whose email you allow (one-time code by email) | free for small teams | 1 to 2 h | No open ports, HTTPS, works in any browser with no install. Still needs your computer on. |
-| **shinyapps.io** or **Posit Connect Cloud** | free tiers are public; password / invite-only needs a paid plan | free to paid | 1 h | `rsconnect::deployApp("app")` after copying `app_data.rds` into `app/`. Least maintenance; check the current plan for private access. |
+| **Posit Connect Cloud** (successor to shinyapps.io) | free plan is public; private links need a paid plan | free to paid | 1 h | `deploy_connect_cloud.R`, with the app's own login on the free plan. Least maintenance. |
 | **Small VPS** (Hetzner, DigitalOcean, Fly.io) with Docker, plus Cloudflare Access or Caddy basic auth | allowed emails, or a shared password | about $5 to $10 a month | half a day | Always on, full control. Recommended once you want it reliably online. |
 | Static page (the `90_export_json...` HTML version) on GitHub Pages / Cloudflare Pages behind Access | allowed emails | free | varies | No R server, but loses the Shiny features (route suggestions, live threshold). |
 

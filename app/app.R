@@ -10,7 +10,8 @@
 # in exclusions.R.
 #
 # Set APP_PASSWORD (and optionally APP_USER) in the environment to put a login
-# screen in front of the app; deploy_shinyapps.R does this for the hosted copy.
+# screen in front of the app. The hosted copy (deploy_connect_cloud.R) always
+# requires one; on Connect Cloud it is set under the content's Variables.
 
 library(shiny)
 library(bslib)
@@ -25,7 +26,9 @@ sf_use_s2(FALSE)
 M_PER_MI <- 1609.344
 OUTSIDE  <- "Outside park boundaries"
 
-app_path <- if (file.exists("data/app_data.rds")) "data/app_data.rds" else "../data/app_data.rds"
+# ../data is the pipeline's output when running locally; data/ (inside app/)
+# is the trimmed copy deploy_connect_cloud.R uploads, used only when hosted.
+app_path <- if (file.exists("../data/app_data.rds")) "../data/app_data.rds" else "data/app_data.rds"
 D <- readRDS(app_path)
 
 trails_ll   <- D$trails_ll
@@ -48,9 +51,9 @@ HITS <- rule_hits(trails_proj, RP, OUTSIDE)
 rule_mi <- vapply(HITS, function(h) sum(trails_proj$length_m[h & !trails_proj$is_service]) / M_PER_MI, 0)
 rule_choices <- setNames(names(RULE_LABELS), sprintf("%s (%s mi)", RULE_LABELS, formatC(rule_mi, format = "f", digits = 1)))
 rule_choices <- rule_choices[rule_mi > 0 | names(rule_choices) %in% RP$exclude_rules_default]
-# On shinyapps.io files written by the app vanish on restart, so edits there are
-# downloaded instead of saved.
-HOSTED <- Sys.getenv("R_CONFIG_ACTIVE") == "shinyapps"
+# The deployed bundle is marked hosted. Files the app writes there vanish on
+# restart, so exclusion edits are downloaded instead of saved.
+HOSTED <- isTRUE(D$hosted)
 
 COL <- list(done = "#1c8a5a", partial = "#d9930f", todo = "#c4463b", run = "#3a5fcd", ink = "#1f2a26",
             trail = "#8a4b14", service = "#6b6b6b", route = "#6a2c91", excluded = "#8f8f8f", draft = "#d1006f")
@@ -666,7 +669,7 @@ server <- function(input, output, session) {
                                      fmt1(sum(e$length_m) / M_PER_MI), nrow(e), nrow(m),
                                      if (unsaved) ", not saved yet" else "")),
       if (HOSTED) p(class = "small text-muted",
-                    "Edits on the hosted app last until it restarts. Download the file, put it in app/ and redeploy to keep them.")
+                    "Edits on the hosted app last until it restarts. Download the file, put it in app/ and publish again to keep them.")
     )
   })
 
@@ -679,9 +682,18 @@ server <- function(input, output, session) {
   )
 }
 
-# Optional login screen. APP_PASSWORD (and APP_USER, default "me") come from
-# the environment: .Renviron locally, or the copy deploy_shinyapps.R bundles.
-if (nzchar(Sys.getenv("APP_PASSWORD"))) {
+# Login screen. APP_PASSWORD (and APP_USER, default "me") come from the
+# environment: Connect Cloud's Variables when hosted, optionally .Renviron
+# locally. The hosted copy fails closed: without a password it shows only
+# setup instructions, never the data.
+if (HOSTED && !nzchar(Sys.getenv("APP_PASSWORD"))) {
+  ui <- fluidPage(
+    h3("Login not configured"),
+    p("Add APP_USER and APP_PASSWORD under Settings > Variables for this content on Connect Cloud,",
+      "then restart it. The dashboard stays hidden until then.")
+  )
+  server <- function(input, output, session) {}
+} else if (nzchar(Sys.getenv("APP_PASSWORD"))) {
   library(shinymanager)
   credentials <- data.frame(user = Sys.getenv("APP_USER", "me"), password = Sys.getenv("APP_PASSWORD"),
                             stringsAsFactors = FALSE)
