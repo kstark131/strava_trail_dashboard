@@ -128,9 +128,11 @@ osm_cache_days     <- 90      # tiles younger than this are not downloaded again
 osm_pause_sec      <- 5       # wait between tile requests
 osm_overpass_url   <- "https://overpass-api.de/api/interpreter"
 
-# --- SHINYAPPS.IO (deploy_shinyapps.R) ---------------------------------------------
-# The login (APP_USER / APP_PASSWORD) goes in .Renviron, never here.
-deploy_app_name       <- "trail-dashboard"   # URL becomes <account>.shinyapps.io/trail-dashboard
+# --- POSIT CONNECT CLOUD (deploy_connect_cloud.R) ---------------------------------
+# The login (APP_USER / APP_PASSWORD) is set as secret Variables on Connect
+# Cloud, never here or in .Renviron.
+deploy_app_name       <- "trail-dashboard"
+deploy_upload         <- TRUE                # FALSE: only prepare the data, then use RStudio's Publish button
 # Run tracks within privacy_radius_m of these lon/lat points are cut out of the
 # online copy (the local app is unchanged). Add home, work, anywhere you start
 # often. Example: list(c(-122.2700, 37.8700))

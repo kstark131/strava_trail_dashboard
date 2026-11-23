@@ -14,7 +14,7 @@ app/app.R                         the Shiny dashboard
 app/route_suggest.R               route suggestions (sourced by app.R)
 app/exclusions.R                  exclusion rules and your saved edits (sourced by app.R)
 app/exclusions.geojson            trails and areas you excluded by hand (created when you first save)
-deploy_shinyapps.R                uploads the app to shinyapps.io behind a password
+deploy_connect_cloud.R            publishes the app to Posit Connect Cloud behind a login
 run_all.R                         runs the pipeline (skipping unchanged steps) and starts the app
 docs/HOSTING.md                   options and a roadmap for putting the app online
 ```
@@ -72,24 +72,43 @@ file to keep it. Route suggestions never use trails excluded by hand, on closed
 land, or marked closed or proposed; paved roads and trails outside parks stay
 usable as connectors.
 
-## Online with shinyapps.io
+## Online with Posit Connect Cloud
 
-`deploy_shinyapps.R` uploads the app with a login screen. The one-time setup is
-at the top of that file: install `rsconnect` and `shinymanager`, connect your
-shinyapps.io account, put `APP_USER` / `APP_PASSWORD` in `.Renviron`, and set
-`privacy_zones` in `00_config.R` (run tracks within `privacy_radius_m` of those
-points are cut from the online copy). Then, after each refresh:
+`deploy_connect_cloud.R` publishes the app following Posit's
+[command-line method](https://docs.posit.co/connect-cloud/how-to/r/shiny-r.html).
+Posit is moving shinyapps.io into Connect Cloud (free shinyapps.io apps are
+migrated automatically from January 2027), so this replaces the earlier
+shinyapps.io script.
+
+One-time setup (details at the top of the script):
 
 ```r
-source("run_all.R")            # or just 01 and 03
-source("deploy_shinyapps.R")
+install.packages(c("rsconnect", "shinymanager"))
+rsconnect::connectCloudUser()       # browser opens; authorize
 ```
 
-The upload has the app code, your exclusions and a trimmed copy of
-`app_data.rds` (no run names or dates). Your Strava secret and raw streams
-never leave your machine. Exclusion edits made on the hosted app last only
-until it restarts, so use Download there, put the file in `app/` and deploy
-again. See `docs/HOSTING.md` for the free-plan limits to check.
+and set `privacy_zones` in `00_config.R`: run tracks within `privacy_radius_m`
+of those points are cut from the online copy. Then, after each refresh:
+
+```r
+source("run_all.R")                 # or just 01 and 03
+source("deploy_connect_cloud.R")
+```
+
+After the first publish, add `APP_USER` and `APP_PASSWORD` under **Settings >
+Variables** for the content on Connect Cloud and restart it. The password is
+stored only there. On the free plan every app is public and listed on your
+profile page, so the app's own login screen is what keeps it private; until the
+password is set, the hosted app shows only a "login not configured" page.
+
+The upload holds the app code, your exclusions and a trimmed copy of
+`app_data.rds` (no run names or dates) written to `app/data/` (git-ignored; the
+local app keeps reading `data/`). Your Strava secret and raw streams never leave
+your machine. Exclusion edits made online last only until the app restarts, so
+use Download there, put the file in `app/` and publish again. To use RStudio's
+Publish button instead of `rsconnect`, set `deploy_upload <- FALSE`, run the
+script to prepare the data, and include `data/app_data.rds` and
+`exclusions.geojson` when publishing `app/app.R`.
 
 ## Route suggestions
 
@@ -152,7 +171,7 @@ of `app/app.R`.
 ## Putting it online
 
 Not implemented yet. `docs/HOSTING.md` compares the options (Tailscale,
-Cloudflare Tunnel + Access, shinyapps.io / Posit Connect Cloud, a small VPS)
+Cloudflare Tunnel + Access, Posit Connect Cloud, a small VPS)
 and lays out a phased plan, starting with a privacy zone around home.
 
 ## Changes, October 2026
