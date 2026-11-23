@@ -1,0 +1,11 @@
+name: trail-dashboard
+title:
+username: kylestark
+account: kylestark
+server: connect.posit.cloud
+hostUrl: https://api.connect.posit.cloud/v1
+appId: 01a20636-0d10-e872-1352-f994248ec78b
+appGuid:
+bundleId:
+url: https://connect.posit.cloud/kylestark/content/01a20636-0d10-e872-1352-f994248ec78b
+version: 1
