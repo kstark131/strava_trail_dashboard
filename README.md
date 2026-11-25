@@ -110,6 +110,39 @@ Publish button instead of `rsconnect`, set `deploy_upload <- FALSE`, run the
 script to prepare the data, and include `data/app_data.rds` and
 `exclusions.geojson` when publishing `app/app.R`.
 
+## Using it on your phone
+
+**The address.** Use the app's share link, not the `connect.posit.cloud/...`
+page that opens after publishing (that is the management page, which asks you
+to sign in to Posit). The share link is
+
+    https://01a20636-0d10-e872-1352-f994248ec78b.share.connect.posit.cloud
+
+or, after you set a custom name under Settings > URL on Connect Cloud,
+`https://kylestark-<name>.share.connect.posit.cloud`. It is also on the Share
+button of the content's card. If you delete the content and publish again it
+gets a new id, so check the card.
+
+**Signing in.** Opening the app needs only the app's own login (APP_USER /
+APP_PASSWORD from Settings > Variables), not a Posit account. You will be asked
+each time the page is opened fresh, so let your phone's password manager save
+it. A Posit sign-in is needed only to publish or change settings.
+
+**Make it feel like an app.** In Safari, Share > Add to Home Screen (Chrome on
+Android: menu > Add to Home screen). It opens full screen from an icon. The app
+sleeps when nobody is using it, so the first load can take several seconds.
+
+**On a phone the layout changes:**
+
+- The map fills the screen. The sidebar opens with the menu button (top left)
+  and closes by itself after you choose a park, pick a trail in the table, or
+  turn on "Review and edit on the map".
+- A line at the top of the map shows the park and how much of it you've run.
+- Tap a trail for its name and progress (hover labels don't work on touch screens).
+- The ◎ button shows where you are (allow location access when asked). With
+  "Suggest a route" on, it also moves the route start to your position, so you
+  can plan from where you're standing.
+
 ## Route suggestions
 
 Open "Route suggestion" in the sidebar, choose a park and tick "Suggest a route

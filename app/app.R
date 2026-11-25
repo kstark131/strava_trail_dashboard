@@ -71,6 +71,21 @@ CSS <- "
   .route-steps { font-size: .85rem; padding-left: 1.2rem; margin: .4rem 0; max-height: 14rem; overflow-y: auto; }
   .subtitle { font-weight: 400; color: #6b7c74; margin-left: .5rem; font-size: .9em; }
   table.dataTable tbody td { vertical-align: middle; }
+  .map-stats { display: none; background: rgba(255,255,255,.92); padding: 4px 9px; border-radius: 8px;
+               font-size: 13px; box-shadow: 0 1px 4px rgba(0,0,0,.2); }
+
+  /* phones (below bslib's sidebar breakpoint): the map fills the screen, the
+     sidebar slides over it, and a stats line sits on the map instead */
+  @media (max-width: 575.98px) {
+    .map-stats { display: block; }
+    .sidebar-note { display: none; }
+    .bslib-value-box .value-box-title { font-size: .8rem; }
+    .bslib-value-box .value-box-value { font-size: 1.25rem; }
+    .bslib-value-box .value-box-area { padding: .5rem .75rem !important; }
+    .form-control, .selectize-input, .selectize-input input { font-size: 16px; }  /* stops iOS zooming into inputs */
+    .info.legend { font-size: 11px; padding: 4px 6px; line-height: 1.3; }
+    .leaflet-bar a, .leaflet-touch .leaflet-bar a { width: 36px; height: 36px; line-height: 36px; }
+  }
 "
 
 # Basemaps offered in the layer control (top right). The first one is shown
@@ -133,12 +148,18 @@ coverage_pieces <- function(thr) {
 # UI
 # ------------------------------------------------------------------------------
 ui <- page_sidebar(
+  fillable_mobile = TRUE,          # let the map fill the phone screen
   title = span("Trail completion", span(class = "subtitle", textOutput("subtitle", inline = TRUE))),
   theme = bs_theme(version = 5, bg = "#fbfaf6", fg = COL$ink, primary = "#1f6f4a", secondary = "#6b7c74",
                    base_font = font_google("IBM Plex Sans"), "border-radius" = "0.6rem") |>
           bs_add_rules(CSS),
   sidebar = sidebar(
-    width = 400,
+    id = "sb",
+    width = 400,                   # open on desktop, a slide-over panel on phones
+    # tells the server whether this is a phone, so it can close the panel after a choice
+    tags$script(HTML("$(document).on('shiny:connected', function() {
+      Shiny.setInputValue('is_mobile', window.matchMedia('(max-width: 575.98px)').matches);
+    });")),
     selectInput("park", "Park", choices = park_choices, selected = ""),
     sliderInput("thr", "Match distance (m)", min = 5, max = 60, value = D$params$default_match_m, step = 5),
     checkboxInput("svc", "Include service roads", value = FALSE),
@@ -203,7 +224,7 @@ ui <- page_sidebar(
         textInput("q", NULL, placeholder = "Filter by name", width = "100%"),
         downloadButton("csv", "CSV", class = "btn-sm")),
     DTOutput("tbl"),
-    p(class = "small text-muted mt-2",
+    p(class = "small text-muted mt-2 sidebar-note",
       sprintf("%s runs in the study area, built %s. Each trail is sampled every %d m; a sample counts as run when a track passes within the match distance. A trail is completed at %d%% of samples.",
               fmt0(D$totals$runs_in_area), format(D$built), as.integer(D$params$node_spacing_m), round(100 * D$params$done_fraction)),
       if (trail_source == "osm") "Trail and park data \u00a9 OpenStreetMap contributors (ODbL)." else NULL)
@@ -211,10 +232,35 @@ ui <- page_sidebar(
   leafletOutput("map", height = "100%")
 )
 
+# Map helpers for phones. The locate button (map.locate) needs HTTPS, which
+# Connect Cloud provides. When the location is found it is drawn as a blue dot
+# with an accuracy circle and sent to the server as input$my_location, which
+# moves the route start there when route suggestions are on.
+LOCATE_JS <- "function(el, x) {
+  var map = this, me = null;
+  map.on('locationfound', function(e) {
+    if (me) map.removeLayer(me);
+    me = L.layerGroup([
+      L.circle(e.latlng, {radius: e.accuracy, weight: 1, color: '#1a73e8', fillOpacity: 0.1, interactive: false}),
+      L.circleMarker(e.latlng, {radius: 7, weight: 2, color: '#fff', fillColor: '#1a73e8', fillOpacity: 1, interactive: false})
+    ]).addTo(map);
+    Shiny.setInputValue('my_location', {lat: e.latlng.lat, lng: e.latlng.lng}, {priority: 'event'});
+  });
+  map.on('locationerror', function(e) { alert('Location not available: ' + e.message); });
+}"
+
+stats_html <- function(park, c_df) {
+  l <- sum(c_df$length_m); f <- if (l > 0) sum(c_df$done_m) / l else 0
+  sprintf("<b>%s</b> &middot; %s of %s mi run", htmltools::htmlEscape(if (nzchar(park)) park else "All parks"),
+          pct(f), fmt1(l / M_PER_MI))
+}
+
 # ------------------------------------------------------------------------------
 # SERVER
 # ------------------------------------------------------------------------------
 server <- function(input, output, session) {
+
+  close_sidebar_on_mobile <- function() if (isTRUE(input$is_mobile)) toggle_sidebar("sb", open = FALSE)
 
   # ---- exclusions: rules switched on, plus your own edits (exclusions.R)
   manual <- reactiveVal(read_exclusions())
@@ -336,6 +382,7 @@ server <- function(input, output, session) {
     } else {
       hl <- filter(trails_ll, trail_id %in% r$ids[[1]])
       b <- st_bbox(hl)
+      close_sidebar_on_mobile()
       leafletProxy("map") %>%
         fitBounds(b[["xmin"]], b[["ymin"]], b[["xmax"]], b[["ymax"]]) %>%
         clearGroup("highlight") %>%
@@ -390,6 +437,9 @@ server <- function(input, output, session) {
     park_view <- nzchar(park)
     edit <- edit && park_view
     if (edit) mode <- "completion"
+    # tap a trail for its name and progress (hover labels don't work on touch
+    # screens); off while editing, where a tap toggles the trail instead
+    pop <- if (park_view && !edit) ~label else NULL
 
     if (mode == "plain") {
       # trails only: one colour, service roads dashed, no completion data
@@ -398,10 +448,10 @@ server <- function(input, output, session) {
       tr <- filter(t, !is_service); sv <- filter(t, is_service)
       opts <- pathOptions(pane = "trails", interactive = park_view)
       if (nrow(sv)) m <- addPolylines(m, data = sv, color = COL$service, weight = 2, opacity = 0.85, dashArray = "5 4",
-                                      smoothFactor = 0.5, label = if (park_view) ~label else NULL,
+                                      smoothFactor = 0.5, label = if (park_view) ~label else NULL, popup = pop,
                                       group = "Trails", options = opts)
       if (nrow(tr)) m <- addPolylines(m, data = tr, color = COL$trail, weight = if (park_view) 3 else 2, opacity = 0.9,
-                                      smoothFactor = 0.5, label = if (park_view) ~label else NULL,
+                                      smoothFactor = 0.5, label = if (park_view) ~label else NULL, popup = pop,
                                       group = "Trails", options = opts)
     } else if (mode == "completion") {
       # where you have run (muted) and, on top, where you have not (highlighted);
@@ -423,10 +473,10 @@ server <- function(input, output, session) {
       done <- filter(pieces, covered); todo <- filter(pieces, !covered)
       lab <- if (park_view) ~label else NULL
       if (nrow(done)) m <- addPolylines(m, data = done, color = COL$done, weight = if (edit) 6 else if (park_view) 3 else 2,
-                                        opacity = 0.7, label = lab, layerId = if (edit) done$lid else NULL,
+                                        opacity = 0.7, label = lab, popup = pop, layerId = if (edit) done$lid else NULL,
                                         smoothFactor = 0.5, group = "Trails", options = opts)
       if (nrow(todo)) m <- addPolylines(m, data = todo, color = COL$todo, weight = if (edit) 6 else if (park_view) 4 else 2.5,
-                                        opacity = 0.95, label = lab, layerId = if (edit) todo$lid else NULL,
+                                        opacity = 0.95, label = lab, popup = pop, layerId = if (edit) todo$lid else NULL,
                                         smoothFactor = 0.5, group = "Trails", options = opts)
     } else {
       # by trail: whole segments coloured by their named trail's share run
@@ -438,7 +488,7 @@ server <- function(input, output, session) {
       for (k in c("todo", "partial", "done")) {
         tk <- filter(t, class == k)
         if (nrow(tk)) m <- addPolylines(m, data = tk, color = colours[[k]], weight = if (park_view) 3.5 else if (k == "done") 2.5 else 2,
-                                        opacity = 0.85, label = if (park_view) ~label else NULL, smoothFactor = 0.5, group = "Trails",
+                                        opacity = 0.85, label = if (park_view) ~label else NULL, popup = pop, smoothFactor = 0.5, group = "Trails",
                                         options = pathOptions(pane = "trails", interactive = park_view))
       }
     }
@@ -448,7 +498,7 @@ server <- function(input, output, session) {
       if (park_view) {
         ex <- mutate(ex, label = sprintf("%s: excluded (%s)%s", name, reason, if (edit) ". Tap to restore" else ""))
         m <- addPolylines(m, data = ex, color = COL$excluded, weight = if (edit) 6 else 3, opacity = 0.85, dashArray = "6 5",
-                          label = ~label, layerId = if (edit) paste0("ex_", ex$trail_id) else NULL,
+                          label = ~label, popup = pop, layerId = if (edit) paste0("ex_", ex$trail_id) else NULL,
                           smoothFactor = 0.5, group = "Excluded", options = pathOptions(pane = "trails"))
       } else {
         m <- addPolylines(m, data = st_sf(geometry = st_combine(st_geometry(ex))), color = COL$excluded, weight = 2,
@@ -500,6 +550,11 @@ server <- function(input, output, session) {
                        position = "topright",
                        options = layersControlOptions(collapsed = TRUE)) %>%
       addScaleBar(position = "bottomleft") %>%
+      addEasyButton(easyButton(icon = "<span style='font-size:18px'>&#9678;</span>", title = "Show my location",
+                               onClick = htmlwidgets::JS("function(btn, map) { map.locate({setView: true, maxZoom: 16}); }"))) %>%
+      htmlwidgets::onRender(LOCATE_JS) %>%
+      addControl(stats_html(isolate(input$park), isolate(cov())), position = "topleft",
+                 layerId = "stats", className = "map-stats") %>%
       addPolylines(data = runs_ll, color = COL$run, weight = 2, opacity = 0.6, group = "runs",
                    smoothFactor = 0.5, options = pathOptions(pane = "runs", interactive = FALSE)) %>%
       fitBounds(bb[["xmin"]], bb[["ymin"]], bb[["xmax"]], bb[["ymax"]])
@@ -517,10 +572,19 @@ server <- function(input, output, session) {
     draw_trails(proxy, cov(), input$park, input$thr, input$view, excluded_view(), isTRUE(input$edit))
   }, ignoreInit = TRUE)
 
-  # zoom only when the park changes (not on every slider move)
+  # zoom only when the park changes (not on every slider move); on a phone,
+  # also close the panel so the map is in view
   observeEvent(input$park, {
     bb <- view_bbox(input$park)
     leafletProxy("map") %>% fitBounds(bb[["xmin"]], bb[["ymin"]], bb[["xmax"]], bb[["ymax"]])
+    close_sidebar_on_mobile()
+  }, ignoreInit = TRUE)
+  observeEvent(input$edit, if (isTRUE(input$edit) && nzchar(input$park)) close_sidebar_on_mobile(), ignoreInit = TRUE)
+
+  # the stats line on the map (shown on phones only, see .map-stats)
+  observeEvent(list(input$park, cov()), {
+    leafletProxy("map") %>% removeControl("stats") %>%
+      addControl(stats_html(input$park, cov()), position = "topleft", layerId = "stats", className = "map-stats")
   }, ignoreInit = TRUE)
 
   observeEvent(input$showruns, {
@@ -537,6 +601,12 @@ server <- function(input, output, session) {
   observeEvent(input$map_click, {
     if (!isTRUE(input$route) || !nzchar(input$park) || isTRUE(input$edit)) return()   # taps edit exclusions instead
     p <- st_transform(st_sfc(st_point(c(input$map_click$lng, input$map_click$lat)), crs = 4326), st_crs(trails_proj))
+    route_start(st_coordinates(p)[1, 1:2])
+  })
+
+  observeEvent(input$my_location, {
+    if (!isTRUE(input$route) || !nzchar(input$park) || isTRUE(input$edit)) return()
+    p <- st_transform(st_sfc(st_point(c(input$my_location$lng, input$my_location$lat)), crs = 4326), st_crs(trails_proj))
     route_start(st_coordinates(p)[1, 1:2])
   })
 
