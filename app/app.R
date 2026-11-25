@@ -232,21 +232,50 @@ ui <- page_sidebar(
   leafletOutput("map", height = "100%")
 )
 
-# Map helpers for phones. The locate button (map.locate) needs HTTPS, which
-# Connect Cloud provides. When the location is found it is drawn as a blue dot
-# with an accuracy circle and sent to the server as input$my_location, which
-# moves the route start there when route suggestions are on.
+# "Follow my location" for phones. The ◎ button toggles live GPS tracking
+# (map.locate with watch: true; browsers allow it only over HTTPS, which
+# Connect Cloud provides). Each fix redraws a blue dot with an accuracy circle.
+# The first fix centres the map; later ones only move the dot, so you can pan
+# away while it keeps tracking, and short GPS dropouts don't stop it. The first
+# fix is also sent to the server as input$my_location, which moves the route
+# start there when route suggestions are on. Tap the button again to stop
+# (tracking costs battery).
 LOCATE_JS <- "function(el, x) {
-  var map = this, me = null;
+  var map = this, me = null, first = false;
+  map._trackBtnStyle = function(on) {
+    var b = document.querySelector('#' + el.id + ' .locate-btn');
+    if (b) b.parentElement.parentElement.style.color = on ? '#1a73e8' : '';
+  };
+  map._toggleTracking = function() {
+    if (map._tracking) {
+      map.stopLocate(); map._tracking = false; map._trackBtnStyle(false);
+      if (me) { map.removeLayer(me); me = null; }
+    } else {
+      map._tracking = true; first = true; map._trackBtnStyle(true);
+      map.locate({watch: true, enableHighAccuracy: true, maximumAge: 5000});
+    }
+  };
   map.on('locationfound', function(e) {
     if (me) map.removeLayer(me);
     me = L.layerGroup([
       L.circle(e.latlng, {radius: e.accuracy, weight: 1, color: '#1a73e8', fillOpacity: 0.1, interactive: false}),
       L.circleMarker(e.latlng, {radius: 7, weight: 2, color: '#fff', fillColor: '#1a73e8', fillOpacity: 1, interactive: false})
     ]).addTo(map);
-    Shiny.setInputValue('my_location', {lat: e.latlng.lat, lng: e.latlng.lng}, {priority: 'event'});
+    if (first) {
+      first = false;
+      map.setView(e.latlng, Math.max(map.getZoom(), 16));
+      Shiny.setInputValue('my_location', {lat: e.latlng.lat, lng: e.latlng.lng}, {priority: 'event'});
+    }
   });
-  map.on('locationerror', function(e) { alert('Location not available: ' + e.message); });
+  // A denied permission, or no fix at all, stops tracking with a message. Once
+  // there is a fix, brief dropouts (tree cover, canyons) are ignored: the dot
+  // stays at the last position and tracking carries on.
+  map.on('locationerror', function(e) {
+    if (!map._tracking || (e.code !== 1 && me)) return;
+    map.stopLocate(); map._tracking = false; map._trackBtnStyle(false);
+    alert(e.code === 1 ? 'Location is blocked. Allow location access for this site in your browser settings.'
+                       : 'Location not available: ' + e.message);
+  });
 }"
 
 stats_html <- function(park, c_df) {
@@ -550,8 +579,9 @@ server <- function(input, output, session) {
                        position = "topright",
                        options = layersControlOptions(collapsed = TRUE)) %>%
       addScaleBar(position = "bottomleft") %>%
-      addEasyButton(easyButton(icon = "<span style='font-size:18px'>&#9678;</span>", title = "Show my location",
-                               onClick = htmlwidgets::JS("function(btn, map) { map.locate({setView: true, maxZoom: 16}); }"))) %>%
+      addEasyButton(easyButton(icon = "<span class='locate-btn' style='font-size:18px'>&#9678;</span>",
+                               title = "Follow my location (tap again to stop)",
+                               onClick = htmlwidgets::JS("function(btn, map) { map._toggleTracking(); }"))) %>%
       htmlwidgets::onRender(LOCATE_JS) %>%
       addControl(stats_html(isolate(input$park), isolate(cov())), position = "topleft",
                  layerId = "stats", className = "map-stats") %>%

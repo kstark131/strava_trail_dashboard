@@ -139,9 +139,13 @@ sleeps when nobody is using it, so the first load can take several seconds.
   turn on "Review and edit on the map".
 - A line at the top of the map shows the park and how much of it you've run.
 - Tap a trail for its name and progress (hover labels don't work on touch screens).
-- The ◎ button shows where you are (allow location access when asked). With
-  "Suggest a route" on, it also moves the route start to your position, so you
-  can plan from where you're standing.
+- The ◎ button follows your GPS position: tap it once (allow location access
+  when asked) and a blue dot with an accuracy circle tracks you as you move;
+  the button turns blue while tracking. The map centres on you once, then
+  leaves panning to you. Short GPS dropouts under trees don't stop it. Tap again
+  to stop, since tracking uses battery. With "Suggest a route" on, the first
+  fix also moves the route start to where you are. Location needs HTTPS, which
+  the Connect Cloud link has; it won't work over plain http on your Wi-Fi.
 
 ## Route suggestions
 
