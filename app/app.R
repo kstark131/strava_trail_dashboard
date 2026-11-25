@@ -300,8 +300,9 @@ server <- function(input, output, session) {
   # trails for the current park and service-road setting, before and after exclusions
   in_view <- reactive({
     t <- trails_ll
-    if (!input$svc) t <- filter(t, !is_service)
-    if (nzchar(input$park)) t <- filter(t, park == input$park)
+    # inputs are NULL until the sidebar exists (e.g. behind the login screen)
+    if (!isTRUE(input$svc)) t <- filter(t, !is_service)
+    if (length(input$park) && nzchar(input$park)) t <- filter(t, park == input$park)
     t
   })
   scope <- reactive(filter(in_view(), !trail_id %in% excl()$trail_id))
@@ -612,7 +613,8 @@ server <- function(input, output, session) {
   observeEvent(input$edit, if (isTRUE(input$edit) && nzchar(input$park)) close_sidebar_on_mobile(), ignoreInit = TRUE)
 
   # the stats line on the map (shown on phones only, see .map-stats)
-  observeEvent(list(input$park, cov()), {
+  observeEvent(list(input$park, input$thr, cov()), {
+    req(!is.null(input$park), !is.null(input$thr))
     leafletProxy("map") %>% removeControl("stats") %>%
       addControl(stats_html(input$park, cov()), position = "topleft", layerId = "stats", className = "map-stats")
   }, ignoreInit = TRUE)
@@ -800,8 +802,11 @@ if (HOSTED && !nzchar(Sys.getenv("APP_PASSWORD"))) {
   ui <- secure_app(ui)
   app_server <- server
   server <- function(input, output, session) {
-    secure_server(check_credentials = check_credentials(credentials))
-    app_server(input, output, session)
+    # Start the dashboard only once someone has logged in: nothing is computed
+    # (or billed) while the login box sits open, and no dashboard code runs
+    # before its inputs exist.
+    auth <- secure_server(check_credentials = check_credentials(credentials))
+    observeEvent(auth$user, app_server(input, output, session), once = TRUE)
   }
 }
 
